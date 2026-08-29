@@ -1,8 +1,7 @@
 blank_issues_enabled: true
 contact_links:
-  # После создания репозитория замените OWNER на своё имя пользователя GitHub.
   - name: Если что-то не так — сначала загляните сюда
-    url: https://github.com/OWNER/WhisperFree#если-что-то-не-так
+    url: https://github.com/MaximusNam/WhisperFree#если-что-то-не-так
     about: Раздел README с разбором частых поломок — тишина вместо звука, вставка не в то окно, окна с правами администратора, потеря хука после сна, две запущенные копии.
   - name: Ключ API Groq
     url: https://console.groq.com/keys

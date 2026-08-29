@@ -31,7 +31,7 @@ terms mixed in — that is what the replacement dictionary is for, see
 ## Features
 
 - Push-to-talk on Right Ctrl — text lands where the caret was, in any Windows window.
-- Transcription through Groq, model `whisper-large-v3-turbo`: 204–336 ms per request (measured, August 2026).
+- Transcription through Groq, model `whisper-large-v3-turbo`: 204–336 ms per request — measured on live dictations, 9.2 seconds of speech on average, August 2026.
 - An editor model pass with `openai/gpt-oss-120b`: punctuation, grammar, agreement, 293–480 ms.
 - A regex-backed term dictionary — every inflected form of a word maps to one canonical spelling, edited in a single file.
 - 250 ms pre-roll: recording starts before the key goes down, so the first syllable is not clipped.
@@ -92,6 +92,7 @@ headers.
 - [What it costs](#what-it-costs)
 - [A different provider](#a-different-provider)
 - [Settings worth knowing](#settings-worth-knowing)
+- [Files next to the program](#files-next-to-the-program)
 - [When something is wrong](#when-something-is-wrong)
 - [Building a standalone exe](#building-a-standalone-exe)
 - [How it works](#how-it-works)
@@ -127,9 +128,8 @@ The key is read only from `.env` or an environment variable. It never ends up in
 
 **3. Language**
 
-The config that ships here dictates Russian on the main key and English on the
-alternate one, because that is what the author uses. Set your own pair in
-`[language]`:
+The config that ships here dictates Russian on Right Ctrl, because that is what
+the author uses. Set your own language in `[language]`:
 
 ```toml
 [language]
@@ -137,8 +137,20 @@ main = "en"
 alt = "ru"
 ```
 
-`main` is the language of the Right Ctrl key; `alt` belongs to the optional
-second key described under [Mixed-language dictation](#mixed-language-dictation).
+`main` is the language of the dictation key, and for a single-language setup it
+is the only one you need. `alt` belongs to an optional second key — and that key
+is not assigned in the shipped config: `[hotkeys].dictate_alt = ""`, so `alt` on
+its own changes nothing. To switch the second key on, give it a key nobody else
+uses:
+
+```toml
+[hotkeys]
+dictate_alt = "scroll_lock"
+```
+
+Right Ctrl then dictates in `main`, Scroll Lock in `alt`. Details under
+[Mixed-language dictation](#mixed-language-dictation).
+
 The values are ISO 639-1 codes, passed straight through to the provider's
 `language` parameter.
 
@@ -160,6 +172,13 @@ A name is safer than an index: indices shift as devices are plugged in and out.
 A fragment of the name is enough and case does not matter. One piece of hardware
 usually shows up under four audio APIs at once (MME, DirectSound, WASAPI,
 WDM-KS) — the one belonging to the default API is used.
+
+While you are here, set the silence threshold. Below `[audio].silence_peak` no
+request is sent at all, and the right value depends on the microphone and on its
+volume in Windows — on the same hardware it moves once you drag the volume
+slider. Do not guess it. **`calibrate.bat`** listens for three seconds while you
+stay quiet, measures the noise floor, and writes the resulting threshold into
+the config itself.
 
 **5. Paste check**
 
@@ -281,8 +300,18 @@ The rules that ship in `config.example.toml` are Russian → English, because th
 is the author's pair. Replace them with yours; nothing in the code assumes a
 particular language.
 
-**3. A separate key for the second language.** Set `dictate_alt` (for example
-`scroll_lock`) — that key dictates in the language from `language.alt`.
+**3. A separate key for the second language.** `[hotkeys].dictate_alt` is empty
+in the shipped config, so out of the box there is exactly one dictation key and
+`language.alt` is not used by anything. Assign the key and it starts dictating
+in `language.alt`:
+
+```toml
+[hotkeys]
+dictate_alt = "scroll_lock"
+```
+
+`scroll_lock`, `pause` or `f13`..`f24` are the good candidates: nothing else
+claims them.
 
 ---
 
@@ -381,8 +410,8 @@ If you need better recognition quality, use `model = "whisper-large-v3"`
 
 ## A different provider
 
-The endpoint is any OpenAI-compatible one, so switching providers is two lines in
-`[provider]` and no code changes:
+The endpoint is any OpenAI-compatible one, so switching providers is three lines
+in `[provider]` and no code changes:
 
 ```toml
 # OpenAI
@@ -414,6 +443,13 @@ printing exactly the same path**. A config edit made from such a program never
 reaches a normal run, and it looks like "my settings are being ignored". A file
 next to the program knows no such substitution.
 
+When that is what you are seeing — the edit sits in the file, the program acts
+as if it never happened — run **`diag.bat`**. It prints the size, the mtime and the
+SHA-256 of the `config.toml` this particular process actually opened, plus the
+`[audio].device` line read out of it. Run it both ways, double-clicked from
+Explorer and from your terminal, and compare: different hashes mean the two
+launches are reading different files.
+
 A fully commented sample is in `config.example.toml`. The current one can be
 opened from the tray.
 
@@ -422,12 +458,43 @@ opened from the tray.
 | `[audio].device` | Microphone. Empty — the system default, otherwise part of a name or an index from `devices.bat` |
 | `[audio].preroll_ms` | How much audio from **before** the keypress goes into the recording. 250 ms saves the first syllable |
 | `[audio].min_seconds` | Shorter than this counts as an accidental press and is ignored |
-| `[audio].silence_peak` | Silence threshold, 0..1. Below it no request is sent. Microphone noise floor ~0.010, speech 0.1–0.7 |
+| `[audio].silence_peak` | Silence threshold, 0..1. Below it no request is sent. Default `0.02`, but it depends on the microphone and its volume — measure it with `calibrate.bat` instead of guessing |
 | `[audio].hold_open` | `false` releases the microphone between dictations — the tray icon goes dark, but the pre-roll is gone |
 | `[inject].paste_overrides` | Paste key for specific programs. `ctrl+shift+v` for terminals |
 | `[inject].method` | `unicode` instead of `clipboard`, if the clipboard must not be touched. Slower |
 | `[history].keep_audio` | Keep the audio of recent dictations, to re-transcribe without saying it again |
 | `[hotkeys].suppress` | Hide the dictation key from applications. Only works for dedicated keys |
+
+---
+
+## Files next to the program
+
+Everything you double-click sits in the project root. These files pick up the
+`.venv` beside them and say so plainly when the environment is missing — the one
+exception is `sound.bat`, which needs no Python at all.
+
+| File | What it does |
+|---|---|
+| `run.vbs` | Silent start: no console, the icon appears in the tray |
+| `run.bat` | The same with a console and a verbose log |
+| `check.bat` | Checks the key, the microphone and the provider: records three seconds and prints what came back |
+| `devices.bat` | Lists microphones — the name from here goes into `[audio].device` |
+| `calibrate.bat` | Measures the noise floor over three seconds of silence and writes the chosen `[audio].silence_peak` into the config itself |
+| `paste-test.bat` | Gives you five seconds to switch windows, pastes a test phrase there and prints which key it used |
+| `limits.bat` | Remaining plan limits, read out of the API response headers |
+| `sound.bat` | Opens the classic Sound panel on the Recording tab: the microphone level slider and Microphone Boost live there, not in modern Settings |
+| `diag.bat` | Prints the size, mtime and SHA-256 of the `config.toml` this particular process actually opened |
+| `build.bat` | Builds the standalone `dist\WhisperFree` folder |
+
+Worth remembering about `calibrate.bat`: the silence threshold depends not only
+on the microphone but on its volume in Windows. Raise the slider and the noise
+floor rises with it, and the old threshold stops catching it. So do not guess the
+threshold — measure it again after every change to the volume.
+
+`diag.bat` answers exactly one question: which config file is the program really
+reading. Run it both ways — by double-clicking from Explorer and from your own
+terminal — and compare the SHA-256 lines. Different hashes mean the two processes
+open different files, which is how a redirected `%APPDATA%` gets caught.
 
 ---
 
@@ -457,11 +524,18 @@ measured level and the threshold, which tells you what to do right away.
   the system default is being used, and that is often not the one you want. Put
   yours in via `devices.bat`.
 - Level noticeable but below the threshold (say 0.015 against a threshold of
-  0.02) — the microphone works but is quiet. Raise the volume in Windows sound
-  settings or lower `[audio].silence_peak`.
+  0.02) — the microphone works but is quiet. Raise the volume in the Windows
+  sound settings: **`sound.bat`** opens the classic panel straight on the
+  Recording tab, where the level slider and Microphone Boost live. Or lower
+  `[audio].silence_peak`.
 
 `check.bat` prints the level, the threshold and what follows from both — start
 there, but do **speak** during the three seconds it listens.
+
+The opposite failure exists too: a threshold below your own noise floor lets
+empty recordings through, and the provider answers them with invented captions.
+Either way the fix is the same — **`calibrate.bat`** measures the noise floor
+over three silent seconds and writes the threshold into the config.
 
 **The microphone icon in the tray stays lit.** By design: the microphone stream
 is held open so the pre-roll works — those 250 ms before the keypress, without
@@ -495,8 +569,9 @@ build.bat
 
 You get a `dist\WhisperFree` folder (74 MB) that can be moved as a whole. Put the
 key in a `.env` next to `WhisperFree.exe` — the program looks for it there too,
-not only in the working directory, otherwise autostart through the registry
-(where the working directory turns out to be System32) would never find it.
+not only in the working directory. The order is: the working directory, then the
+folder holding the exe, then `%APPDATA%\WhisperFree`; the first `.env` found
+wins. So a shortcut, or a launch from some other folder, still finds the key.
 
 The build is tested and runs. Two pitfalls are already worked around and
 documented in `build.bat` and `whisperfree.spec`, so nobody steps on them again:
@@ -529,7 +604,11 @@ Threads: the main one runs the Tk loop, the keyboard hook lives in its own and
 its handlers must return instantly, all the slow work goes to a worker thread,
 and the tray and the microphone spin separately.
 
-Tests:
+Tests. pytest lives in the `dev` extras, which the quick start does not install:
+
+```bash
+.venv\Scripts\python -m pip install -e ".[dev]"
+```
 
 ```bash
 .venv\Scripts\python -m pytest -q
@@ -547,13 +626,16 @@ Windows 10 Pro 19045):
 - **The clipboard** survives Cyrillic, multi-line text, guillemets, dashes and
   non-BMP emoji; the previous contents come back.
 - **The silence cutoff** works: peak level of an empty recording is 0.0000
-  against a threshold of 0.004.
+  against the default threshold of 0.02.
 - **Active window detection** works — the program sees the exe name, so it can
   pick the paste key and record where the text went.
-- **Groq answers in 270–340 ms** on a two-second fragment, network included. With
-  encoding and pasting on top, that fits inside the 1.5 s target with room to
-  spare — the same cycle took 2–4 s for me on Wispr Flow.
-- **367 automated tests** pass, including an end-to-end run of the pipeline
+- **Groq answers in 270–340 ms** on a single two-second test fragment, network
+  included. That is a different measurement from the 204–336 ms in
+  [Features](#features): this one is a short probe of the endpoint, that one is
+  live dictations averaging 9.2 seconds of speech. With encoding and pasting on
+  top, the cycle fits inside the 1.5 s target with room to spare — the same
+  cycle took 2–4 s for me on Wispr Flow.
+- **383 automated tests** pass, including an end-to-end run of the pipeline
   against a stub provider: the request goes out with the right language and
   prompt seed, the replacement dictionary is applied before the paste, the record
   reaches history before the paste, and after a failed paste the text is
@@ -591,7 +673,12 @@ Bug reports, measurements on other hardware, rules for the replacement dictionar
 and support for new terminals are all welcome. The process is in
 [CONTRIBUTING.md](CONTRIBUTING.md).
 
-Before a pull request it is worth running the tests, currently 367 of them:
+Before a pull request it is worth running the tests, currently 383 of them.
+pytest comes with the `dev` extras, which the quick start does not install:
+
+```bash
+.venv\Scripts\python -m pip install -e ".[dev]"
+```
 
 ```bash
 .venv\Scripts\python -m pytest

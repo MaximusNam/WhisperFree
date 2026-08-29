@@ -48,7 +48,7 @@ Issues = "https://github.com/MaximusNam/WhisperFree/issues"
 Changelog = "https://github.com/MaximusNam/WhisperFree/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0", "pytest-mock>=3.12"]
+dev = ["pytest>=8.0"]
 build = ["pyinstaller>=6.0"]
 
 [project.scripts]

@@ -9,11 +9,18 @@ from __future__ import annotations
 
 import json
 import time
+from datetime import datetime
 
 import pytest
 
 from whisperfree.config import HistoryConfig
 from whisperfree.history import History, Record
+
+# Момент, на котором останавливаются часы в тестах расходов. Полдень
+# двенадцатого числа выбран нарочно: он далеко и от полуночи, и от границы
+# месяца, и от перевода часов, поэтому «сегодня» и «этот месяц» считаются
+# одинаково в любом часовом поясе.
+FROZEN_NOW = datetime(2024, 6, 12, 12, 0, 0)
 
 
 @pytest.fixture
@@ -26,6 +33,29 @@ def cfg():
 @pytest.fixture
 def history(tmp_path, cfg):
     return History(tmp_path / "history.jsonl", cfg)
+
+
+@pytest.fixture
+def now(monkeypatch) -> float:
+    """Останавливает часы, по которым usage() отбивает сутки и месяц.
+
+    usage() берёт границу суток от локальной полуночи в момент вызова, а
+    записи создаются раньше. Прогон, пересёкший полночь между этими двумя
+    моментами, насчитал бы за сегодня ноль — тест падал бы раз в сутки без
+    всякой поломки кода, а на границе месяца ронял бы ещё и месячный счёт.
+    Заморозка убирает зависимость от момента запуска и от часового пояса,
+    не трогая саму арифметику: границы считаются тем же кодом, что и в бою.
+
+    Возвращает штамп времени, который тесты ставят своим записям.
+    """
+
+    class Frozen(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return FROZEN_NOW
+
+    monkeypatch.setattr("whisperfree.history.datetime", Frozen)
+    return FROZEN_NOW.timestamp()
 
 
 def rec(text: str, **kwargs) -> Record:
@@ -168,19 +198,28 @@ class TestQueries:
 
 
 class TestUsage:
-    def test_short_dictations_are_billed_at_the_minimum(self, history):
+    def test_short_dictations_are_billed_at_the_minimum(self, history, now):
         # У Groq минимальный тарифицируемый отрезок 10 с: три диктовки по две
         # секунды стоят как тридцать секунд, а не как шесть.
         for _ in range(3):
-            history.add(rec("ага", audio_sec=2.0))
+            history.add(rec("ага", audio_sec=2.0, ts=now))
 
         stats = history.usage(price_per_hour=0.04, min_billed_seconds=10)
         assert stats["today_seconds"] == 30.0
         assert stats["today_usd"] == pytest.approx(30 / 3600 * 0.04)
 
-    def test_failed_records_are_not_billed(self, history):
-        history.add(rec("", audio_sec=20.0, error="сеть недоступна"))
+    def test_failed_records_are_not_billed(self, history, now):
+        history.add(rec("", audio_sec=20.0, error="сеть недоступна", ts=now))
         assert history.usage(0.04, 10)["today_seconds"] == 0.0
+
+    def test_yesterday_counts_for_the_month_but_not_for_today(self, history, now):
+        # Граница суток — локальная полночь, а не «сутки назад».
+        history.add(rec("вчера", audio_sec=20.0, ts=now - 86400))
+        history.add(rec("сегодня", audio_sec=20.0, ts=now))
+
+        stats = history.usage(0.04, 10)
+        assert stats["today_seconds"] == 20.0
+        assert stats["month_seconds"] == 40.0
 
 
 class TestFullCost:
@@ -193,8 +232,8 @@ class TestFullCost:
     PRICE_IN = 0.15   # $/млн токенов входа
     PRICE_OUT = 0.60  # $/млн токенов выхода
 
-    def test_refine_tokens_add_to_the_bill(self, history):
-        history.add(rec("привет", audio_sec=9.2, refine_in=218, refine_out=96))
+    def test_refine_tokens_add_to_the_bill(self, history, now):
+        history.add(rec("привет", audio_sec=9.2, refine_in=218, refine_out=96, ts=now))
         stats = history.usage(0.04, 10, self.PRICE_IN, self.PRICE_OUT)
 
         expected_stt = 10 / 3600 * 0.04           # 9.2 с округляются до минимума
@@ -203,23 +242,23 @@ class TestFullCost:
         assert stats["today_refine_usd"] == pytest.approx(expected_refine)
         assert stats["today_usd"] == pytest.approx(expected_stt + expected_refine)
 
-    def test_refinement_is_comparable_to_transcription(self, history):
+    def test_refinement_is_comparable_to_transcription(self, history, now):
         # Не деталь реализации, а факт из замеров: если правка вдруг станет
         # на порядок дороже, это повод заметить.
-        history.add(rec("привет", audio_sec=9.2, refine_in=218, refine_out=96))
+        history.add(rec("привет", audio_sec=9.2, refine_in=218, refine_out=96, ts=now))
         stats = history.usage(0.04, 10, self.PRICE_IN, self.PRICE_OUT)
 
         ratio = stats["today_refine_usd"] / stats["today_stt_usd"]
         assert 0.3 < ratio < 3.0
 
-    def test_without_refinement_only_transcription_counts(self, history):
-        history.add(rec("привет", audio_sec=9.2))
+    def test_without_refinement_only_transcription_counts(self, history, now):
+        history.add(rec("привет", audio_sec=9.2, ts=now))
         stats = history.usage(0.04, 10, self.PRICE_IN, self.PRICE_OUT)
 
         assert stats["today_refine_usd"] == 0.0
         assert stats["today_usd"] == stats["today_stt_usd"]
 
-    def test_zero_prices_keep_the_old_behaviour(self, history):
-        history.add(rec("привет", audio_sec=9.2, refine_in=218, refine_out=96))
+    def test_zero_prices_keep_the_old_behaviour(self, history, now):
+        history.add(rec("привет", audio_sec=9.2, refine_in=218, refine_out=96, ts=now))
         stats = history.usage(0.04, 10)
         assert stats["today_usd"] == pytest.approx(10 / 3600 * 0.04)
