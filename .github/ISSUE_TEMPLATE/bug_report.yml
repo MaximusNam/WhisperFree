@@ -1,0 +1,152 @@
+name: Отчёт об ошибке
+description: Не слышит микрофон, не распознаёт, не вставляет текст, не запускается
+title: "[баг] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## ⚠️ Сначала про ключ API
+
+        **Не вставляйте сюда содержимое `.env`, значение `GROQ_API_KEY` и любые другие токены.**
+
+        Issue публичный. Всё, что сюда попало, видно всем, попадает в почтовые
+        уведомления и остаётся в истории правок даже после того, как вы это удалите.
+
+        Ключ Groq начинается с `gsk_`. Перед отправкой пробегитесь глазами по
+        выводу команд и по куску лога: если встретили такую строку — замените её
+        на `gsk_…`. Программа сама ключ в лог не пишет, но вывод `check.bat` вы
+        могли скопировать вместе с содержимым `.env`.
+
+        Если ключ всё-таки утёк — отзовите его на https://console.groq.com/keys
+        и выпустите новый, это полминуты.
+
+  - type: dropdown
+    id: stage
+    attributes:
+      label: На каком шаге сломалось
+      description: Выберите то, что ближе всего. Если непонятно — «не запускается».
+      options:
+        - Не слышит микрофон (тишина, уровень ниже порога, нет звука)
+        - Не распознаёт (ошибка API, пустой результат, чужой язык, бред в тексте)
+        - Текст не вставляется (распознало, но в поле ничего не появилось)
+        - Вставляется не туда (текст ушёл в другое окно или в терминал не так)
+        - Не запускается (падает при старте, не появляется значок в трее)
+        - Автозапуск (не стартует со входом в систему, стартует дважды)
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: Что произошло и что ожидалось
+      description: |
+        По шагам: что нажали, что сказали, что увидели. Если текст вставился, но
+        неправильный — приведите, что сказали и что получилось.
+      placeholder: |
+        1. Зажал правый Ctrl, сказал «поставь докер на сервер», отпустил.
+        2. Значок в трее мигнул, но в поле ничего не появилось.
+        3. Ожидал, что текст вставится в окно Telegram.
+    validations:
+      required: true
+
+  - type: input
+    id: windows
+    attributes:
+      label: Версия Windows
+      description: 'Win+R → `winver`. Нужны и версия, и номер сборки: на 10 и 11 по-разному ведут себя буфер обмена и хук клавиатуры.'
+      placeholder: Windows 10 Pro 22H2, сборка 19045.4651
+    validations:
+      required: true
+
+  - type: input
+    id: python
+    attributes:
+      label: Версия Python
+      description: '`.venv\Scripts\python --version`. Если запускаете собранный exe — напишите «exe из build.bat».'
+      placeholder: Python 3.11.9
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Версия WhisperFree
+      description: 'Номер из `pyproject.toml` или тег релиза, плюс как запускаете: `run.bat`, `run.vbs`, автозапуск или собранный exe.'
+      placeholder: 0.1.0, запускаю run.bat
+    validations:
+      required: true
+
+  - type: textarea
+    id: devices
+    attributes:
+      label: Микрофон и вывод devices.bat
+      description: |
+        Какой микрофон используете (модель, USB/встроенный/Bluetooth) и что
+        напечатал `devices.bat`. Отдельно скажите, задан ли микрофон явно в
+        `config.toml` или берётся системный по умолчанию — системный сплошь и
+        рядом оказывается не тем.
+      render: shell
+    validations:
+      required: true
+
+  - type: input
+    id: target-window
+    attributes:
+      label: В каком окне не сработало
+      description: |
+        Имя процесса, а не название программы: его видно в диспетчере задач на
+        вкладке «Подробности». Это важно, потому что для терминалов вставка идёт
+        через Ctrl+Shift+V, а для остальных окон — через Ctrl+V.
+      placeholder: WindowsTerminal.exe (или chrome.exe, Telegram.exe, WINWORD.EXE)
+    validations:
+      required: true
+
+  - type: textarea
+    id: check-output
+    attributes:
+      label: Вывод check.bat
+      description: |
+        Запустите `check.bat` и **говорите** в те три секунды, что он слушает,
+        иначе он честно сообщит про тишину. Вставьте вывод целиком: там есть и
+        уровень сигнала, и порог, и результат распознавания.
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: log
+    attributes:
+      label: Кусок лога
+      description: |
+        Лог лежит рядом с программой в `logs\whisperfree.log`, а если программа
+        установлена не переносимо — в `%APPDATA%\WhisperFree\logs\whisperfree.log`.
+        Открывается из меню в трее. Какой именно файл читает ваш процесс, точно
+        скажет `diag.bat`.
+
+        Нужны не все 40 тысяч строк, а последние 30–50 вокруг неудачной диктовки:
+        строка «настройки» при старте и строка с таймингами по стадиям.
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Что ещё может быть важно
+      description: |
+        Например: окно запущено от администратора, включён антивирус с защитой
+        буфера обмена, ноутбук вернулся из сна, работает удалённый рабочий стол,
+        программа стоит из Microsoft Store.
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: no-secrets
+    attributes:
+      label: Перед отправкой
+      options:
+        - label: В отчёте нет ключа API, содержимого `.env` и других токенов
+          required: true
+        - label: Я проверил, что запущена только одна копия WhisperFree
+          required: false

@@ -1,0 +1,333 @@
+"""Захват звука: выбор устройства, пре-ролл, кодирование.
+
+Настоящий микрофон здесь не открывается — только логика вокруг него.
+"""
+
+from __future__ import annotations
+
+import io
+
+import numpy as np
+import pytest
+import soundfile as sf
+
+from whisperfree import audio as audio_mod
+from whisperfree.audio import AudioError, Capture, encode, parse_device, peak_level, resolve_device
+
+
+class FakeDefault:
+    hostapi = 0
+    device = [1, 4]
+
+
+# Одна и та же железка видна под четырьмя звуковыми API — ровно как на машине,
+# где это писалось: «Микрофон (Logitech StreamCam)» с индексами 2, 8, 15, 29.
+DEVICES = [
+    {"name": "Microsoft Sound Mapper - Input", "max_input_channels": 2, "hostapi": 0},
+    {"name": "Line (3- Steinberg UR22C)", "max_input_channels": 2, "hostapi": 0},
+    {"name": "Микрофон (Logitech StreamCam)", "max_input_channels": 2, "hostapi": 0},
+    {"name": "Динамики (Realtek)", "max_input_channels": 0, "hostapi": 0},
+    {"name": "Микрофон (Logitech StreamCam)", "max_input_channels": 2, "hostapi": 1},
+    {"name": "Микрофон (Logitech StreamCam)", "max_input_channels": 2, "hostapi": 2},
+    {"name": "Микрофон (Logitech StreamCam)", "max_input_channels": 2, "hostapi": 3},
+]
+
+HOSTAPIS = [
+    {"name": "MME", "default_input_device": 1},
+    {"name": "Windows DirectSound", "default_input_device": 4},
+    {"name": "Windows WASAPI", "default_input_device": 5},
+    {"name": "Windows WDM-KS", "default_input_device": 6},
+]
+
+
+@pytest.fixture
+def fake_devices(monkeypatch):
+    monkeypatch.setattr(audio_mod.sd, "query_devices", lambda: DEVICES)
+    monkeypatch.setattr(audio_mod.sd, "query_hostapis", lambda: HOSTAPIS)
+    monkeypatch.setattr(audio_mod.sd, "default", FakeDefault())
+
+
+class TestParseDevice:
+    def test_empty_means_system_default(self):
+        assert parse_device("") is None
+        assert parse_device(None) is None
+        assert parse_device("   ") is None
+
+    def test_digits_become_an_index(self):
+        assert parse_device("2") == 2
+        assert parse_device(2) == 2
+
+    def test_name_stays_a_string(self):
+        assert parse_device("Logitech StreamCam") == "Logitech StreamCam"
+
+
+class TestResolveDevice:
+    def test_index_passes_through(self, fake_devices):
+        assert resolve_device(2) == 2
+        assert resolve_device("2") == 2
+
+    def test_empty_stays_none(self, fake_devices):
+        assert resolve_device("") is None
+
+    def test_ambiguous_name_picks_the_default_host_api(self, fake_devices):
+        # sounddevice на такое имя отвечает «Multiple input devices found»,
+        # поэтому выбираем сами: MME здесь — API по умолчанию.
+        assert resolve_device("Logitech StreamCam") == 2
+
+    def test_partial_name_is_enough(self, fake_devices):
+        assert resolve_device("StreamCam") == 2
+
+    def test_match_is_case_insensitive(self, fake_devices):
+        assert resolve_device("streamcam") == 2
+
+    def test_unique_name_resolves_directly(self, fake_devices):
+        assert resolve_device("Steinberg") == 1
+
+    def test_output_only_devices_are_skipped(self, fake_devices):
+        with pytest.raises(AudioError):
+            resolve_device("Динамики")
+
+    def test_unknown_name_lists_what_is_available(self, fake_devices):
+        with pytest.raises(AudioError, match="не найден"):
+            resolve_device("Blue Yeti")
+
+    def test_wasapi_wins_when_default_api_has_no_match(self, monkeypatch, fake_devices):
+        class OtherDefault:
+            hostapi = 9  # такого API среди совпадений нет
+            device = [1, 4]
+
+        monkeypatch.setattr(audio_mod.sd, "default", OtherDefault())
+        assert resolve_device("Logitech StreamCam") == 5  # индекс WASAPI
+
+
+class TestCapture:
+    def test_duration_from_sample_count(self):
+        capture = Capture(samples=np.zeros(32000, dtype=np.int16), sample_rate=16000)
+        assert capture.duration_s == pytest.approx(2.0)
+
+    def test_empty_capture_has_zero_duration(self):
+        assert Capture(samples=np.zeros(0, dtype=np.int16), sample_rate=16000).duration_s == 0.0
+
+    def test_peak_level_of_silence_is_below_the_threshold(self):
+        capture = Capture(samples=np.zeros(16000, dtype=np.int16), sample_rate=16000)
+        assert peak_level(capture) == 0.0
+
+    def test_peak_level_of_loud_signal(self):
+        samples = np.full(1000, 16384, dtype=np.int16)
+        assert peak_level(Capture(samples=samples, sample_rate=16000)) == pytest.approx(0.5)
+
+
+class TestEncode:
+    @pytest.fixture
+    def tone(self):
+        t = np.linspace(0, 1.0, 16000, endpoint=False)
+        return Capture(
+            samples=(0.3 * np.sin(2 * np.pi * 220 * t) * 32767).astype(np.int16),
+            sample_rate=16000,
+        )
+
+    def test_flac_is_lossless(self, tone):
+        data, name = encode(tone, "flac")
+        assert name == "speech.flac"
+
+        back, sr = sf.read(io.BytesIO(data), dtype="int16")
+        assert sr == 16000
+        assert np.array_equal(back, tone.samples)
+
+    def test_flac_is_much_smaller_than_wav(self, tone):
+        # Меньше данных на отправку — меньше задержка до вставки.
+        flac, _ = encode(tone, "flac")
+        wav, _ = encode(tone, "wav")
+        assert len(flac) < len(wav) * 0.6
+
+    def test_unknown_format_falls_back_to_flac(self, tone):
+        assert encode(tone, "mp3")[1] == "speech.flac"
+        assert encode(tone, "")[1] == "speech.flac"
+
+
+class TestPreroll:
+    def test_ring_buffer_holds_the_configured_lead_in(self):
+        recorder = audio_mod.Recorder(sample_rate=16000, preroll_ms=250)
+        expected = round(0.250 * 16000 / audio_mod.BLOCKSIZE)
+        assert recorder._ring.maxlen == expected
+
+    def test_preroll_audio_lands_in_the_capture(self):
+        """Звук, сказанный до нажатия клавиши, должен попасть в запись —
+        иначе первый слог систематически срезается."""
+        recorder = audio_mod.Recorder(sample_rate=16000, preroll_ms=250)
+        block = np.full((audio_mod.BLOCKSIZE, 1), 1000, dtype=np.int16)
+
+        for _ in range(10):  # микрофон пишет в кольцевой буфер ещё до нажатия
+            recorder._callback(block, audio_mod.BLOCKSIZE, None, None)
+
+        recorder.begin()
+        recorder._callback(block, audio_mod.BLOCKSIZE, None, None)
+        capture = recorder.end()
+
+        preroll_blocks = recorder._ring.maxlen
+        assert len(capture.samples) == (preroll_blocks + 1) * audio_mod.BLOCKSIZE
+
+    def test_capture_is_truncated_at_the_limit(self):
+        recorder = audio_mod.Recorder(sample_rate=16000, preroll_ms=0, max_seconds=1)
+        block = np.full((audio_mod.BLOCKSIZE, 1), 500, dtype=np.int16)
+
+        recorder.begin()
+        for _ in range(100):  # заметно больше секунды
+            recorder._callback(block, audio_mod.BLOCKSIZE, None, None)
+        capture = recorder.end()
+
+        assert capture.truncated
+        assert len(capture.samples) <= 16000
+
+    def test_cancel_throws_the_recording_away(self):
+        recorder = audio_mod.Recorder(sample_rate=16000, preroll_ms=0)
+        block = np.full((audio_mod.BLOCKSIZE, 1), 500, dtype=np.int16)
+
+        recorder.begin()
+        recorder._callback(block, audio_mod.BLOCKSIZE, None, None)
+        recorder.cancel()
+
+        assert len(recorder.end().samples) == 0
+
+    def test_blocks_are_ignored_until_recording_starts(self):
+        recorder = audio_mod.Recorder(sample_rate=16000, preroll_ms=0)
+        block = np.full((audio_mod.BLOCKSIZE, 1), 500, dtype=np.int16)
+
+        recorder._callback(block, audio_mod.BLOCKSIZE, None, None)
+        assert len(recorder.end().samples) == 0
+
+
+class TestHoldOpen:
+    """Микрофон, занятый постоянно, Windows показывает горящим значком в трее.
+
+    hold_open=false отпускает устройство между диктовками ценой пре-ролла.
+    """
+
+    def test_hold_open_keeps_the_stream(self, monkeypatch):
+        opened, closed = [], []
+        _patch_stream(monkeypatch, opened, closed)
+
+        recorder = audio_mod.Recorder(preroll_ms=0, hold_open=True)
+        recorder.open()
+        recorder.begin()
+        recorder.end()
+
+        assert len(opened) == 1
+        assert not closed  # устройство осталось занятым, как и задумано
+
+    def test_release_mode_frees_the_device_after_each_dictation(self, monkeypatch):
+        opened, closed = [], []
+        _patch_stream(monkeypatch, opened, closed)
+
+        recorder = audio_mod.Recorder(preroll_ms=0, hold_open=False)
+        recorder.begin()
+        _join_mic_threads()
+        assert recorder.is_open
+
+        recorder.end()
+        assert not recorder.is_open
+        assert len(closed) == 1
+
+    def test_short_press_does_not_leave_the_microphone_open(self, monkeypatch):
+        """Нажатие может кончиться раньше, чем устройство поднимется.
+
+        Без проверки «нас ещё ждут» поток открылся бы уже после end() и
+        микрофон остался бы занятым навсегда.
+        """
+        opened, closed = [], []
+        _patch_stream(monkeypatch, opened, closed)
+
+        recorder = audio_mod.Recorder(preroll_ms=0, hold_open=False)
+        recorder.begin()
+        recorder.end()  # отпустили раньше, чем поток успел открыться
+        _join_mic_threads()
+
+        assert not recorder.is_open
+        assert recorder._stream is None
+
+
+class _FakeStream:
+    def __init__(self, opened, closed, **kwargs):
+        self._opened = opened
+        self._closed = closed
+        self.active = False
+
+    def start(self):
+        self.active = True
+        self._opened.append(self)
+
+    def stop(self):
+        self.active = False
+
+    def close(self):
+        self._closed.append(self)
+
+
+def _patch_stream(monkeypatch, opened, closed):
+    monkeypatch.setattr(
+        audio_mod.sd,
+        "InputStream",
+        lambda **kwargs: _FakeStream(opened, closed, **kwargs),
+    )
+
+
+def _join_mic_threads(timeout: float = 2.0) -> None:
+    import threading
+
+    for thread in threading.enumerate():
+        if thread.name == "mic-open":
+            thread.join(timeout)
+
+
+class TestNormalize:
+    """Тихий микрофон — не только риск не пройти порог тишины: на слабом
+    сигнале распознавание ошибается заметно чаще."""
+
+    def quiet(self, peak: float, seconds: float = 1.0) -> Capture:
+        t = np.linspace(0, seconds, int(16000 * seconds), endpoint=False)
+        samples = (peak * np.sin(2 * np.pi * 200 * t) * 32767).astype(np.int16)
+        return Capture(samples=samples, sample_rate=16000)
+
+    def test_very_quiet_recording_is_pulled_up_but_capped(self):
+        # Замер на StreamCam до прибавления громкости: речь дала 0.027.
+        # Усиление упирается в потолок — до цели не дотягиваем намеренно,
+        # потому что на таком слабом входе шум усиливается вместе с речью.
+        capture, gain = audio_mod.normalize(self.quiet(0.027))
+
+        assert gain == audio_mod.NORMALIZE_MAX_GAIN
+        assert peak_level(capture) > 0.2  # всё равно на порядок громче исходного
+
+    def test_moderately_quiet_recording_reaches_the_target(self):
+        capture, gain = audio_mod.normalize(self.quiet(0.1))
+
+        assert gain == pytest.approx(7.0, rel=0.05)
+        assert peak_level(capture) == pytest.approx(audio_mod.NORMALIZE_TARGET, abs=0.02)
+
+    def test_loud_recording_is_left_alone(self):
+        capture, gain = audio_mod.normalize(self.quiet(0.7))
+        assert gain == 1.0
+
+    def test_gain_is_capped(self):
+        # Иначе на почти пустой записи мы раскачали бы шум до уровня речи
+        # и получили бы выдуманный текст вместо пустоты.
+        _, gain = audio_mod.normalize(self.quiet(0.0005))
+        assert gain == audio_mod.NORMALIZE_MAX_GAIN
+
+    def test_silence_is_not_amplified_into_noise(self):
+        silence = Capture(samples=np.zeros(16000, dtype=np.int16), sample_rate=16000)
+        capture, gain = audio_mod.normalize(silence)
+
+        assert gain == 1.0
+        assert peak_level(capture) == 0.0
+
+    def test_no_clipping(self):
+        capture, _ = audio_mod.normalize(self.quiet(0.03))
+        assert capture.samples.max() <= 32767
+        assert capture.samples.min() >= -32768
+
+    def test_duration_and_rate_are_preserved(self):
+        original = self.quiet(0.05, seconds=2.0)
+        capture, _ = audio_mod.normalize(original)
+
+        assert capture.sample_rate == original.sample_rate
+        assert len(capture.samples) == len(original.samples)

@@ -1,0 +1,37 @@
+name: Предложение
+description: Чего не хватает или что стоит сделать иначе
+title: "[идея] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Коротко: что не получается сделать сейчас и как должно быть.
+        Ключи API и содержимое `.env` сюда тоже не вставляем — issue публичный.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Какая задача не решается
+      description: Не «добавьте кнопку», а что вы делаете и обо что спотыкаетесь.
+      placeholder: Диктую в двух языках подряд, и приходится каждый раз лезть в config.toml менять language.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Как это должно работать
+      description: Ваш вариант решения. Если вариантов нет — так и напишите, это нормально.
+    validations:
+      required: true
+
+  - type: textarea
+    id: workaround
+    attributes:
+      label: Как выкручиваетесь сейчас
+      description: |
+        Обходной путь, настройка в `config.toml`, другая программа — что угодно.
+        Часто оказывается, что нужное уже есть, просто называется иначе.
+    validations:
+      required: false

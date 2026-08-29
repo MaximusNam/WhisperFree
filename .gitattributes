@@ -1,0 +1,23 @@
+# По умолчанию git сам решает, что текст, и приводит его в репозитории к LF.
+# Ниже — только те случаи, где решать за него приходится нам.
+* text=auto
+
+# cmd.exe и WSH требуют CRLF: с одиночным LF cmd теряет по символу
+# на каждой границе строк, и батник рассыпается. WSH на таком .vbs
+# просто отказывается запускаться.
+*.bat text eol=crlf
+*.vbs text eol=crlf
+
+*.py text eol=lf
+*.md text eol=lf
+*.toml text eol=lf
+*.yml text eol=lf
+*.spec text eol=lf
+LICENSE text eol=lf
+
+# Двоичное не трогать: нормализация концов строк испортила бы содержимое.
+*.png binary
+*.jpg binary
+*.ico binary
+*.wav binary
+*.flac binary

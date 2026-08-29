@@ -1,0 +1,103 @@
+# Тесты WhisperFree.
+#
+# Прогон только на Windows и не из вредности: программа насквозь завязана на
+# Win32 — ctypes/user32 для SendInput и хука WH_KEYBOARD_LL, winreg для разбора
+# наследства старого автозапуска, именованные мьютексы kernel32, .vbs через WSH.
+# На Linux половина тестов не соберётся, поэтому матрицы по ОС здесь нет и быть
+# не должно.
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# Пушим в ветку часто; смысла держать очередь из устаревших прогонов нет.
+# Предыдущий запуск той же ветки отменяется, добежит только последний.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    runs-on: windows-latest
+
+    strategy:
+      # Падение на одной версии не должно скрывать результат остальных:
+      # чаще всего ломается ровно одна (свежая), и полезно видеть, какая.
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+
+    # Тесты и исходники по-русски, а stdout раннера — не UTF-8. Без этих двух
+    # переменных первое же упавшее сравнение со строкой вроде "ключ=НЕТ"
+    # печатается в cp1252 и даёт UnicodeEncodeError вместо текста ошибки.
+    env:
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: "utf-8"
+
+    # Тесты интерфейса крутят цикл Tk. Если Tk на раннере однажды всё-таки
+    # зависнет при создании окна, лучше упасть через четверть часа, чем висеть
+    # шесть часов до общего таймаута GitHub.
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+        # Про .gitattributes: tests/test_launchers.py читает .bat и .vbs
+        # побайтово и требует CRLF (cmd.exe на одиночном LF теряет по символу
+        # на каждой строке). В репозитории для этого стоит `*.bat text eol=crlf`,
+        # и обычный checkout его соблюдает. Не добавлять сюда
+        # `git config core.autocrlf` и не выключать нормализацию — тесты
+        # запускалок покраснеют, а причина будет выглядеть мистической.
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          # Обязательно. Без этой строки setup-python ищет requirements.txt,
+          # не находит его (зависимости живут в pyproject.toml) и падает
+          # с "No file in ... matched to [**/requirements.txt]".
+          cache-dependency-path: pyproject.toml
+
+      # Ставим в интерпретатор раннера, БЕЗ venv. Это не лень: пакет при импорте
+      # чинит пути к Tcl/Tk, но только когда видит venv (в .venv\Scripts рядом
+      # с python.exe нет каталога tcl). Вне venv он сразу выходит, и Tk находит
+      # свою библиотеку сам. Заведёте здесь venv — добавите себе ещё одну
+      # зависимость от раскладки каталогов, которой сейчас нет.
+      - name: Установка пакета и dev-зависимостей
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      # ВАЖНО, И ЭТО НЕ ПОЛОМКА — читать до того, как «чинить».
+      #
+      # 1. Звук. Часть тестов импортирует sounddevice, часть — soundfile.
+      #    Микрофона на раннере нет и не нужно: query_devices, query_hostapis и
+      #    InputStream подменяются через monkeypatch (см. tests/test_audio.py),
+      #    настоящий поток не открывается ни разу. Нативные библиотеки при этом
+      #    нужны, но они уже внутри колёс: PortAudio лежит в
+      #    sounddevice-*-win_amd64.whl, libsndfile — в soundfile-*-win_amd64.whl.
+      #    Ставить PortAudio отдельно (choco, vcpkg, сборка из исходников) НЕ НАДО
+      #    — системных пакетов этому workflow не требуется вообще.
+      #    Единственный реальный способ сломать это место — заставить pip взять
+      #    универсальное колесо py3-none-any вместо win_amd64: в нём DLL нет,
+      #    и импорт sounddevice упадёт ещё на сборе тестов.
+      #
+      # 2. Tk. tests/conftest.py держит ОДИН корень tkinter.Tk() на всю сессию
+      #    (несколько корней в одном процессе Tk переносит плохо). Корень
+      #    создаётся лениво — только когда тест просит фикстуру root, то есть в
+      #    test_ui.py и test_pipeline.py. Оконная станция у windows-latest есть,
+      #    окна создаются, интерактивный рабочий стол не нужен, аналог Xvfb на
+      #    Windows не существует и не требуется. Если Tk когда-нибудь всё же
+      #    упадёт — смотреть надо на сборку Python (нет Tcl/Tk в дистрибутиве),
+      #    а не искать «headless-режим».
+      #
+      # 3. Сеть и ключи. httpx замокан целиком, наружу не ходит ни один тест.
+      #    GROQ_API_KEY здесь не нужен — не заводите секрет ради зелёной галочки.
+      - name: Тесты
+        run: python -m pytest -q
