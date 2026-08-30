@@ -331,3 +331,100 @@ class TestNormalize:
 
         assert capture.sample_rate == original.sample_rate
         assert len(capture.samples) == len(original.samples)
+
+
+class TestStalledStream:
+    """Поток микрофона умирает открытым, и снаружи это неотличимо от тишины.
+
+    Живой случай: с 22:52 каждое нажатие давало ровно 0.26 секунды, сколько
+    клавишу ни держи. 0.26 — это пре-ролл, накопленный ДО нажатия: колбэк
+    PortAudio перестал срабатывать, а поток остался «открытым», и is_open
+    честно отвечал True. Отличить это от короткого нажатия можно только по
+    одному признаку: за время записи не пришло НИ ОДНОГО нового блока.
+    """
+
+    @staticmethod
+    def recorder():
+        return audio_mod.Recorder(sample_rate=16000, preroll_ms=250)
+
+    @staticmethod
+    def block():
+        return np.full((audio_mod.BLOCKSIZE, 1), 1000, dtype=np.int16)
+
+    def test_no_fresh_blocks_over_the_grace_period_is_a_stall(self, monkeypatch):
+        recorder = self.recorder()
+        # Пре-ролл набрали ДО нажатия — именно он и возвращался пользователю.
+        for _ in range(8):
+            recorder._callback(self.block(), audio_mod.BLOCKSIZE, None, None)
+
+        clock = iter([100.0, 100.0 + audio_mod.STALL_GRACE + 2.0])
+        monkeypatch.setattr(audio_mod.time, "monotonic", lambda: next(clock))
+
+        recorder.begin()
+        capture = recorder.end()  # ни одного колбэка между begin и end
+
+        assert capture.stalled
+        assert capture.duration_s > 0  # пре-ролл на месте, поэтому не ноль
+
+    def test_a_short_press_is_not_a_stall(self, monkeypatch):
+        # Отпустили раньше, чем успел прийти первый блок. Это норма, а не
+        # поломка: ругаться тут значило бы кричать на каждое случайное касание.
+        recorder = self.recorder()
+        clock = iter([100.0, 100.0 + audio_mod.STALL_GRACE / 2])
+        monkeypatch.setattr(audio_mod.time, "monotonic", lambda: next(clock))
+
+        recorder.begin()
+        assert not recorder.end().stalled
+
+    def test_arriving_audio_is_not_a_stall(self, monkeypatch):
+        recorder = self.recorder()
+        clock = iter([100.0, 100.0 + 5.0])
+        monkeypatch.setattr(audio_mod.time, "monotonic", lambda: next(clock))
+
+        recorder.begin()
+        recorder._callback(self.block(), audio_mod.BLOCKSIZE, None, None)
+        assert not recorder.end().stalled
+
+    def test_one_single_block_is_enough_to_clear_the_alarm(self, monkeypatch):
+        # Признак — не «мало звука», а «звука нет вовсе». Потери блоков ловит
+        # отдельная проверка, сравнивающая удержание с длиной записи.
+        recorder = self.recorder()
+        clock = iter([100.0, 100.0 + 30.0])
+        monkeypatch.setattr(audio_mod.time, "monotonic", lambda: next(clock))
+
+        recorder.begin()
+        recorder._callback(self.block(), audio_mod.BLOCKSIZE, None, None)
+        assert not recorder.end().stalled
+
+    def test_preroll_alone_does_not_clear_the_alarm(self, monkeypatch):
+        # Ровно та ловушка, в которую попала программа: буфер не пустой,
+        # длина ненулевая, а звука за время нажатия не пришло.
+        recorder = self.recorder()
+        for _ in range(8):
+            recorder._callback(self.block(), audio_mod.BLOCKSIZE, None, None)
+
+        clock = iter([100.0, 100.0 + 3.0])
+        monkeypatch.setattr(audio_mod.time, "monotonic", lambda: next(clock))
+
+        recorder.begin()
+        capture = recorder.end()
+
+        assert len(capture.samples) > 0
+        assert capture.stalled
+
+    def test_cancel_resets_the_counter(self, monkeypatch):
+        recorder = self.recorder()
+        clock = iter([100.0, 100.0 + 3.0])
+        monkeypatch.setattr(audio_mod.time, "monotonic", lambda: next(clock))
+
+        recorder.begin()
+        recorder._callback(self.block(), audio_mod.BLOCKSIZE, None, None)
+        recorder.cancel()
+
+        assert recorder._fresh_blocks == 0
+        assert recorder._began_at == 0.0
+
+    def test_a_capture_that_never_began_is_not_a_stall(self):
+        # end() без begin(): счётчик времени нулевой, и выдумывать поломку
+        # на пустом месте нельзя.
+        assert not self.recorder().end().stalled

@@ -12,6 +12,7 @@ from __future__ import annotations
 import io
 import logging
 import threading
+import time
 from collections import deque
 from dataclasses import dataclass
 
@@ -22,6 +23,11 @@ import soundfile as sf
 log = logging.getLogger(__name__)
 
 BLOCKSIZE = 512  # 32 мс при 16 кГц — достаточно мелко для точного пре-ролла
+
+# Сколько ждать первого блока, прежде чем считать поток мёртвым.
+# Блок приходит каждые 32 мс, так что полсекунды — это пятнадцать
+# пропущенных подряд: случайностью такое уже не объяснить.
+STALL_GRACE = 0.5
 
 
 class AudioError(RuntimeError):
@@ -35,6 +41,10 @@ class Capture:
     samples: np.ndarray  # int16, моно
     sample_rate: int
     truncated: bool = False
+    # Колбэк не прислал ни одного блока за всю запись: поток жив по документам,
+    # но звука не даёт. Отличать это от короткого нажатия обязательно —
+    # выглядят они одинаково, а лечатся по-разному.
+    stalled: bool = False
 
     @property
     def duration_s(self) -> float:
@@ -145,6 +155,9 @@ class Recorder:
         self._captured = 0
         self._capturing = False
         self._truncated = False
+        # Блоки, пришедшие ИМЕННО во время записи, — пре-ролл сюда не входит.
+        self._fresh_blocks = 0
+        self._began_at = 0.0
         self._lock = threading.Lock()
         # Отдельный замок на открытие и закрытие устройства: держать основной
         # замок во время медленных вызовов PortAudio нельзя, иначе колбэк
@@ -202,6 +215,8 @@ class Recorder:
             self._frames.clear()
             self._captured = 0
             self._capturing = False
+            self._fresh_blocks = 0
+            self._began_at = 0.0
         self.open()
 
     @property
@@ -223,6 +238,7 @@ class Recorder:
                 return
             self._frames.append(block)
             self._captured += len(block)
+            self._fresh_blocks += 1
 
     def begin(self) -> None:
         """Начать запись, забрав в неё пре-ролл.
@@ -235,6 +251,8 @@ class Recorder:
             self._frames = list(self._ring)
             self._captured = sum(len(b) for b in self._frames)
             self._truncated = False
+            self._fresh_blocks = 0
+            self._began_at = time.monotonic()
             self._capturing = True
 
         if not self.hold_open and self._stream is None:
@@ -267,7 +285,14 @@ class Recorder:
             self._capturing = False
             frames, self._frames = self._frames, []
             truncated = self._truncated
+            fresh = self._fresh_blocks
+            held = time.monotonic() - self._began_at if self._began_at else 0.0
             self._captured = 0
+
+        # За STALL_GRACE секунд колбэк обязан сработать хотя бы раз: блок идёт
+        # каждые 32 мс. Ни одного за полсекунды — поток мёртв. Короткое нажатие
+        # сюда не попадает: оно просто не успевает продлиться так долго.
+        stalled = held > STALL_GRACE and fresh == 0
 
         if not self.hold_open:
             self.close()
@@ -281,7 +306,12 @@ class Recorder:
             if len(samples) > self.max_samples:
                 samples = samples[: self.max_samples]
                 truncated = True
-        return Capture(samples=samples, sample_rate=self.sample_rate, truncated=truncated)
+        return Capture(
+            samples=samples,
+            sample_rate=self.sample_rate,
+            truncated=truncated,
+            stalled=stalled,
+        )
 
     def cancel(self) -> None:
         """Бросить текущую запись, ничего не возвращая."""
@@ -290,6 +320,8 @@ class Recorder:
             self._frames = []
             self._captured = 0
             self._truncated = False
+            self._fresh_blocks = 0
+            self._began_at = 0.0
 
 
 def encode(capture: Capture, fmt: str = "flac") -> tuple[bytes, str]:

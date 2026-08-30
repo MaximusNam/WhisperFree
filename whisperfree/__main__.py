@@ -263,6 +263,21 @@ class App:
         if self.tray is not None:
             self.tray.set_state(False)
 
+        # Проверять ДО отсечки по длине. Мёртвый поток отдаёт один пре-ролл,
+        # то есть заведомо меньше минимума, и отсечка уносила единственное
+        # объяснение в отладочную строку: человек видел, что программа молчит,
+        # и не мог понять почему.
+        if capture.stalled:
+            held = time.monotonic() - started
+            log.error(
+                "микрофон перестал отдавать звук: клавишу держали %.1f с, "
+                "записано %.2f с. Переоткрываю поток.",
+                held, capture.duration_s,
+            )
+            self.overlay.error("микрофон замолчал — переоткрываю, повторите")
+            threading.Thread(target=self._try_reopen, daemon=True).start()
+            return
+
         if capture.duration_s < self.cfg.audio.min_seconds:
             log.debug("запись %.2f с короче порога — игнорирую", capture.duration_s)
             self.overlay.hide()

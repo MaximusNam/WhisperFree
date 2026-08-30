@@ -7,6 +7,9 @@
 
 from __future__ import annotations
 
+import logging
+import time
+
 import numpy as np
 import pytest
 import tomlkit
@@ -260,3 +263,79 @@ class TestRefine:
 
         assert app.refiner.seen == []
         assert app.injector.pasted == []
+
+
+class TestDeadMicrophoneIsNoticed:
+    """Мёртвый поток отдаёт один пре-ролл — короче минимума.
+
+    Отсечка по длине срабатывала раньше и уносила единственное объяснение
+    в отладочную строку. Человек видел, что программа молчит на каждое
+    нажатие, и понять причину не мог: в логе на уровне INFO не было ничего.
+    """
+
+    @staticmethod
+    def press(app, capture):
+        """Проигрывает нажатие и отпускание с заданной записью."""
+        app._recording = True
+        app._press_at = time.monotonic() - 3.0
+        app._lang = app.cfg.language.main
+        app.recorder = FakeRecorder(capture)
+        app._stop_dictation()
+
+    def test_a_stalled_capture_triggers_a_reopen(self, app, monkeypatch, caplog):
+        reopened = []
+        monkeypatch.setattr(app, "_try_reopen", lambda: reopened.append(True))
+
+        capture = audio_mod.Capture(
+            samples=np.zeros(4160, dtype=np.int16),  # 0.26 с, как в живом случае
+            sample_rate=16000,
+            stalled=True,
+        )
+        with caplog.at_level(logging.ERROR):
+            self.press(app, capture)
+
+        assert reopened == [True]
+        assert app.injector.pasted == []
+
+    def test_the_reason_is_in_the_log_at_error_level(self, app, monkeypatch, caplog):
+        # Не DEBUG: пользователь запускает через run.vbs, где лога на экране нет
+        # вовсе, а в файл на уровне INFO отладочные строки не попадают.
+        monkeypatch.setattr(app, "_try_reopen", lambda: None)
+        capture = audio_mod.Capture(
+            samples=np.zeros(4160, dtype=np.int16), sample_rate=16000, stalled=True
+        )
+        with caplog.at_level(logging.ERROR):
+            self.press(app, capture)
+
+        assert "микрофон" in caplog.text.lower()
+        assert "переоткрываю" in caplog.text.lower()
+
+    def test_an_ordinary_short_press_stays_quiet(self, app, monkeypatch, caplog):
+        # Случайное касание клавиши поломкой не считается и в лог не кричит.
+        reopened = []
+        monkeypatch.setattr(app, "_try_reopen", lambda: reopened.append(True))
+
+        capture = audio_mod.Capture(
+            samples=np.zeros(3200, dtype=np.int16), sample_rate=16000, stalled=False
+        )
+        with caplog.at_level(logging.ERROR):
+            self.press(app, capture)
+
+        assert reopened == []
+        assert "микрофон" not in caplog.text.lower()
+
+
+class FakeRecorder:
+    def __init__(self, capture):
+        self.capture = capture
+        self.reopened = 0
+
+    def end(self):
+        return self.capture
+
+    def reopen(self):
+        self.reopened += 1
+
+    @property
+    def is_open(self):
+        return True
