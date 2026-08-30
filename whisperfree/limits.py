@@ -4,7 +4,14 @@
 тариф у конкретного ключа может отличаться, и гадать тут незачем.
 
 Каждая диктовка расходует один запрос к распознаванию и, если включена
-правка, один к чат-модели. Значит потолок задаёт тот лимит, который меньше.
+правка, один к чат-модели. Но упирается всё обычно не в число запросов.
+
+У провайдера есть и суточный бюджет ТОКЕНОВ, и в заголовках его нет: он
+показывается только в тексте ошибки, когда уже кончился. Проверено на живом
+ключе — счётчик запросов показывал 461 из 1000 свободными, а запросы уже
+получали 429 с текстом «tokens per day (TPD): Limit 200000, Used 199672».
+Поэтому потолок по запросам мы называем потолком по запросам и честно
+предупреждаем, что бюджет токенов кончается раньше.
 """
 
 from __future__ import annotations
@@ -56,26 +63,78 @@ def format_limits(limits: dict[str, str]) -> list[str]:
     return out or ["   лимиты в заголовках есть, но в незнакомом виде"]
 
 
-def ceiling(stt: dict[str, str], chat: dict[str, str] | None) -> str | None:
-    """Сколько диктовок в сутки позволяет узкое место."""
+def ceiling(
+    stt: dict[str, str],
+    chat: dict[str, str] | None,
+    tokens_per_dictation: float = 0.0,
+) -> list[str]:
+    """Сколько диктовок в сутки позволяет узкое место.
+
+    Возвращает список строк, а не одну: у бесплатного тарифа два разных
+    потолка, и назвать только первый — значит обещать вдвое больше, чем есть.
+    """
     try:
         stt_limit = int(stt["limit-requests"])
     except (KeyError, ValueError):
-        return None
+        return []
 
     if chat is None:
-        return f"ПОТОЛОК: {stt_limit} диктовок в сутки (правка выключена)."
+        return [f"ПОТОЛОК ПО ЗАПРОСАМ: {stt_limit} диктовок в сутки (правка выключена)."]
 
     try:
         chat_limit = int(chat["limit-requests"])
     except (KeyError, ValueError):
-        return None
+        return []
 
     narrower = "правка" if chat_limit <= stt_limit else "распознавание"
-    return (
-        f"ПОТОЛОК: {min(stt_limit, chat_limit)} диктовок в сутки — "
+    out = [
+        f"ПОТОЛОК ПО ЗАПРОСАМ: {min(stt_limit, chat_limit)} диктовок в сутки — "
         f"узкое место это {narrower}."
-    )
+    ]
+
+    # Второй потолок — суточный бюджет токенов. В заголовках его нет, поэтому
+    # не гадаем: показываем расход на диктовку, измеренный по собственной
+    # истории, и говорим, как из него получить своё число.
+    if tokens_per_dictation > 0:
+        out.append("")
+        out.append(
+            f"Но правка тратит ещё и токены: {tokens_per_dictation:.0f} на диктовку "
+            f"по вашей истории."
+        )
+        out.append(
+            "У провайдера есть отдельный СУТОЧНЫЙ БЮДЖЕТ ТОКЕНОВ, и в заголовках "
+            "его нет — он виден только в тексте ошибки, когда уже кончился."
+        )
+        out.append(
+            f"Разделите свой бюджет на {tokens_per_dictation:.0f} и получите "
+            f"настоящий потолок. Для 200 000 токенов это "
+            f"{200000 / tokens_per_dictation:.0f} диктовок, а не "
+            f"{min(stt_limit, chat_limit)}."
+        )
+    return out
+
+
+def tokens_per_dictation(cfg) -> float:
+    """Средний расход токенов на правку по собственной истории.
+
+    Считаем по своим записям, а не по табличке в документации: длина затравки
+    и многословность диктовок у всех разные, и чужое среднее тут бесполезно.
+    """
+    if not cfg.refine.enabled:
+        return 0.0
+    try:
+        from . import config as config_mod
+        from .history import History
+
+        records = History(config_mod.history_path(), cfg.history).recent(limit=500)
+    except Exception as exc:  # pragma: no cover - истории может не быть вовсе
+        log.debug("не удалось прочитать историю для расчёта токенов: %s", exc)
+        return 0.0
+
+    spent = [r.refine_in + r.refine_out for r in records if r.refine_in and r.refine_out]
+    if not spent:
+        return 0.0
+    return sum(spent) / len(spent)
 
 
 def silent_probe() -> bytes:
@@ -134,10 +193,11 @@ def report(cfg) -> int:
         print(f"Не удалось получить лимиты: {type(exc).__name__}: {exc}")
         return 1
 
-    verdict = ceiling(stt, chat)
+    verdict = ceiling(stt, chat, tokens_per_dictation(cfg))
     if verdict:
         print()
-        print(verdict)
+        for line in verdict:
+            print(line)
 
     print()
     print("Остаток восстанавливается постепенно, а не разом в полночь.")

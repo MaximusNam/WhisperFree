@@ -65,10 +65,12 @@ Everything I can claim about speed and cost comes from my own measurements on
 live requests, August 2026: transcription 204–336 ms, refinement 293–480 ms, an
 average dictation of 9.2 seconds of speech and 104 characters of output. The
 Groq free tier at that same moment gave 2000 transcription requests and 1000
-chat-model requests per day — a ceiling of roughly 1000 dictations a day, and
-the refinement pass is what you hit first. Providers change their limits;
-`limits.bat` shows the current ones, read straight from the API response
-headers.
+chat-model requests per day. But the request count is not what you hit first:
+there is also a daily token budget, 200,000 of them, and at 268 tokens per
+dictation that works out to roughly 750 dictations a day. That budget appears in
+no response header — it shows up only in the text of the error once it is gone,
+which is exactly how I found it. Providers change their limits; `limits.bat`
+shows both what the headers carry and your own measured spend per dictation.
 
 | | WhisperFree | Wispr Flow |
 |---|---|---|
@@ -391,9 +393,10 @@ To reach $15 a month you would have to dictate **more than six hours a day, ever
 day**. In practice the bill closes under a dollar.
 
 You may not pay anything at all: on the Groq free tier, as measured in August
-2026, the ceiling was 2000 transcription requests and 1000 chat-model requests a
-day. Providers change limits, so check yours with `limits.bat` — it reads the
-current values from the API response headers.
+2026, the limits were 2000 transcription requests and 1000 chat-model requests a
+day, plus a daily budget of 200,000 tokens. The token budget is the one that runs
+out first — about 750 dictations a day. Providers change limits, so check yours
+with `limits.bat`.
 
 **Where you overpay.** Groq bills a minimum of 10 seconds. A 3-second utterance
 is billed as ten seconds, three times its own length. Three short utterances cost
@@ -635,7 +638,7 @@ Windows 10 Pro 19045):
   live dictations averaging 9.2 seconds of speech. With encoding and pasting on
   top, the cycle fits inside the 1.5 s target with room to spare — the same
   cycle took 2–4 s for me on Wispr Flow.
-- **383 automated tests** pass, including an end-to-end run of the pipeline
+- **480 automated tests** pass, including an end-to-end run of the pipeline
   against a stub provider: the request goes out with the right language and
   prompt seed, the replacement dictionary is applied before the paste, the record
   reaches history before the paste, and after a failed paste the text is
@@ -673,7 +676,7 @@ Bug reports, measurements on other hardware, rules for the replacement dictionar
 and support for new terminals are all welcome. The process is in
 [CONTRIBUTING.md](CONTRIBUTING.md).
 
-Before a pull request it is worth running the tests, currently 383 of them.
+Before a pull request it is worth running the tests, currently 480 of them.
 pytest comes with the `dev` extras, which the quick start does not install:
 
 ```bash
