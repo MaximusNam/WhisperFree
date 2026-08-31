@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 import tkinter as tk
 from tkinter import ttk
 from typing import Callable
@@ -14,6 +15,17 @@ from typing import Callable
 from .history import History, Record
 
 log = logging.getLogger(__name__)
+
+
+def _in_background(action, record) -> None:
+    """Уводит медленную операцию из потока Tk.
+
+    Поток одноразовый и демонский: окно истории закрывается сразу, ждать
+    завершения некому, а висящий недемонский поток не дал бы программе выйти.
+    """
+    threading.Thread(
+        target=action, args=(record,), name="history-action", daemon=True
+    ).start()
 
 
 class HistoryWindow:
@@ -141,11 +153,18 @@ class HistoryWindow:
             return
         # Прячем окно, иначе текст уедет в него, а не в рабочее приложение.
         self._close()
-        self.root.after(220, lambda: self.on_paste(record))
+        # Вставка идёт в отдельном потоке, а не прямо здесь. Внутри она ждёт
+        # отпускания модификаторов и держит паузу после Ctrl+V — почти полсекунды.
+        # В потоке Tk это заморозило бы и насос оверлея, и опрос уровня: плашка
+        # замирала бы ровно тогда, когда человек на неё смотрит.
+        self.root.after(220, lambda: _in_background(self.on_paste, record))
 
     def _copy_selected(self) -> None:
         record = self._selected()
         if record is not None:
-            self.on_copy(record)
+            # Буфер обмена Windows умеет быть занятым чужим процессом, и тогда
+            # обращение к нему повторяется с паузами. В потоке Tk это тот же
+            # заморозивший плашку случай, что и со вставкой.
+            _in_background(self.on_copy, record)
             if hasattr(self, "_status"):
                 self._status.configure(text="скопировано в буфер")

@@ -116,4 +116,4 @@
 #### Сборка и тесты
 
 - Сборка через PyInstaller в режиме onedir: папку `dist\WhisperFree` можно перенести на другую машину.
-- 490 тестов на pytest: `.venv\Scripts\python -m pytest`.
+- 692 тестов на pytest: `.venv\Scripts\python -m pytest`.

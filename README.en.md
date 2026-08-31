@@ -32,7 +32,7 @@ terms mixed in — that is what the replacement dictionary is for, see
 
 - Push-to-talk on Right Ctrl — text lands where the caret was, in any Windows window.
 - Transcription through Groq, model `whisper-large-v3-turbo`: 204–336 ms per request — measured on live dictations, 9.2 seconds of speech on average, August 2026.
-- An editor model pass with `openai/gpt-oss-120b`: punctuation, grammar, agreement, 293–490 ms.
+- An editor model pass with `openai/gpt-oss-120b`: punctuation, grammar, agreement, 293–692 ms.
 - A regex-backed term dictionary — every inflected form of a word maps to one canonical spelling, edited in a single file.
 - 250 ms pre-roll: recording starts before the key goes down, so the first syllable is not clipped.
 - The API key is read only from `.env` or an environment variable, and never written into `config.toml`.
@@ -62,7 +62,7 @@ applied *after* it, so the last word on terminology belongs to your file, not to
 the model.
 
 Everything I can claim about speed and cost comes from my own measurements on
-live requests, August 2026: transcription 204–336 ms, refinement 293–490 ms, an
+live requests, August 2026: transcription 204–336 ms, refinement 293–692 ms, an
 average dictation of 9.2 seconds of speech and 104 characters of output. The
 Groq free tier at that same moment gave 2000 transcription requests and 1000
 chat-model requests per day. But the request count is not what you hit first:
@@ -153,7 +153,7 @@ dictate_alt = "scroll_lock"
 Right Ctrl then dictates in `main`, Scroll Lock in `alt`. Details under
 [Mixed-language dictation](#mixed-language-dictation).
 
-The values are ISO 639-1 codes, passed straight through to the provider's
+The values are ISO 692-1 codes, passed straight through to the provider's
 `language` parameter.
 
 **4. Check**
@@ -638,7 +638,7 @@ Windows 10 Pro 19045):
   live dictations averaging 9.2 seconds of speech. With encoding and pasting on
   top, the cycle fits inside the 1.5 s target with room to spare — the same
   cycle took 2–4 s for me on Wispr Flow.
-- **490 automated tests** pass, including an end-to-end run of the pipeline
+- **692 automated tests** pass, including an end-to-end run of the pipeline
   against a stub provider: the request goes out with the right language and
   prompt seed, the replacement dictionary is applied before the paste, the record
   reaches history before the paste, and after a failed paste the text is
@@ -676,7 +676,7 @@ Bug reports, measurements on other hardware, rules for the replacement dictionar
 and support for new terminals are all welcome. The process is in
 [CONTRIBUTING.md](CONTRIBUTING.md).
 
-Before a pull request it is worth running the tests, currently 490 of them.
+Before a pull request it is worth running the tests, currently 692 of them.
 pytest comes with the `dev` extras, which the quick start does not install:
 
 ```bash

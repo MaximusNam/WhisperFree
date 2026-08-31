@@ -192,9 +192,136 @@ class TestQueries:
         assert [r.text for r in history.search("докер")] == ["поставь докер"]
         assert [r.text for r in history.search("chrome")] == ["привет"]
 
-    def test_label_is_truncated_for_the_tray(self, history):
+    def test_search_finds_failures_by_reason(self, history):
+        # У неудачи текст пустой, а причина лежит в error. Пока поиск не
+        # смотрел в error, любой непустой запрос прятал все неудачи разом —
+        # и «когда последний раз молчал микрофон» было не найти, хотя
+        # неудачи стали писать в историю именно ради этого.
+        history.add(rec("поставь докер", target_exe="notepad.exe"))
+        history.add(rec("", audio_sec=4.0, error="микрофон молчал"))
+
+        assert [r.error for r in history.search("микрофон")] == ["микрофон молчал"]
+
+    def test_search_by_reason_does_not_drag_in_the_rest(self, history):
+        history.add(rec("", error="сеть недоступна"))
+        history.add(rec("поставь докер"))
+
+        assert [r.text for r in history.search("докер")] == ["поставь докер"]
+
+    def test_label_is_truncated_for_the_tray(self):
         record = rec("а" * 200)
         assert len(record.label(40)) <= 40 + len("00:00  ")
+
+    def test_label_of_a_failure_names_the_reason(self):
+        # Раньше в меню трея висело «16:40  (пусто)». В трей лезут как раз
+        # тогда, когда ничего не вставилось, — и ответа там не находили.
+        record = rec("", audio_sec=4.0, error="тишина: уровень 0.002 ниже порога 0.105")
+
+        assert "тишина" in record.label(40)
+        assert "(пусто)" not in record.label(40)
+
+    def test_label_of_a_failure_still_fits_a_menu_item(self):
+        # Причина бывает длиннее пункта меню — режем её так же, как текст.
+        record = rec("", error="провайдер ответил ошибкой: " + "о" * 200)
+
+        assert len(record.label(40)) <= 40 + len("00:00  ")
+
+    def test_label_prefers_the_text_when_there_is_one(self):
+        # У провала вставки текст есть; по этому пункту меню кликают, чтобы
+        # вставить снова, — значит показывать надо его, а не причину.
+        record = rec("поставь докер", error="нет активного окна")
+
+        assert record.label(40).endswith("поставь докер")
+
+
+class TestAmendingAfterAdd:
+    """Часть записи выясняется уже после add.
+
+    В историю пишут ДО вставки, чтобы не потерять текст, если приложение
+    упадёт на вставке. Значит провал вставки приходится дописывать в уже
+    записанную запись, и дописанное обязано дойти до файла: иначе одна и
+    та же диктовка до перезапуска и после считается по-разному.
+    """
+
+    def test_add_returns_the_record(self, history):
+        record = rec("привет")
+        assert history.add(record) is record
+
+    def test_field_set_after_add_reaches_the_file(self, tmp_path, cfg):
+        path = tmp_path / "history.jsonl"
+        record = History(path, cfg).add(rec("поставь докер", audio_sec=20.0))
+
+        record.error = "окно не приняло вставку"
+
+        assert History(path, cfg).records[0].error == "окно не приняло вставку"
+
+    def test_cost_is_the_same_before_and_after_restart(self, tmp_path, cfg, now):
+        record = History(tmp_path / "history.jsonl", cfg).add(
+            rec("поставь докер", audio_sec=20.0, ts=now)
+        )
+        record.error = "окно не приняло вставку"
+
+        live = History(tmp_path / "history.jsonl", cfg)
+        # Расшифровку получили и оплатили, не прошла только вставка: такая
+        # диктовка в счёт идёт — и до перезапуска, и после него.
+        assert live.usage(0.04, 10)["today_seconds"] == 20.0
+        assert live.usage(0.04, 10) == History(
+            tmp_path / "history.jsonl", cfg
+        ).usage(0.04, 10)
+
+    def test_update_writes_several_fields_in_one_go(self, tmp_path, cfg):
+        path = tmp_path / "history.jsonl"
+        history = History(path, cfg)
+        record = history.add(rec("привет"))
+
+        assert history.update(record, error="буфер занят", target_exe="code.exe") is True
+
+        got = History(path, cfg).records[0]
+        assert (got.error, got.target_exe) == ("буфер занят", "code.exe")
+
+    def test_update_rejects_a_field_that_does_not_exist(self, history):
+        record = history.add(rec("привет"))
+        with pytest.raises(ValueError):
+            history.update(record, reason="опечатка в имени поля")
+
+    def test_record_loaded_from_disk_is_editable_too(self, tmp_path, cfg):
+        path = tmp_path / "history.jsonl"
+        History(path, cfg).add(rec("привет"))
+
+        History(path, cfg).records[0].error = "правка после перезапуска"
+
+        assert History(path, cfg).records[0].error == "правка после перезапуска"
+
+    def test_rotated_out_record_is_not_resurrected(self, tmp_path):
+        cfg = HistoryConfig(max_records=3, retention_days=0)
+        path = tmp_path / "history.jsonl"
+        history = History(path, cfg)
+        old = history.add(rec("самая старая"))
+        for i in range(5):
+            history.add(rec(f"ф{i}"))
+        history.compact()
+
+        assert history.update(old, error="через update") is False
+        old.error = "через присваивание"
+
+        written = path.read_text(encoding="utf-8")
+        assert "самая старая" not in written
+        assert "через" not in written
+
+    def test_disabled_history_writes_nothing_after_amendment(self, tmp_path):
+        path = tmp_path / "history.jsonl"
+        record = History(path, HistoryConfig(enabled=False)).add(rec("секрет"))
+
+        record.error = "и причина тоже секрет"
+
+        assert not path.exists()
+
+    def test_link_to_the_journal_does_not_leak_into_the_file(self, tmp_path, cfg):
+        path = tmp_path / "history.jsonl"
+        History(path, cfg).add(rec("привет"))
+
+        payload = json.loads(path.read_text(encoding="utf-8").splitlines()[0])
+        assert "_journal" not in payload
 
 
 class TestUsage:
@@ -208,9 +335,67 @@ class TestUsage:
         assert stats["today_seconds"] == 30.0
         assert stats["today_usd"] == pytest.approx(30 / 3600 * 0.04)
 
-    def test_failed_records_are_not_billed(self, history, now):
+    def test_a_failure_before_the_answer_is_not_billed(self, history, now):
+        # Тишина, мёртвый микрофон, оборванная сеть: ответа провайдера не
+        # было, платить не за что. Звук при этом записан — по одной только
+        # длительности такую запись от оплаченной не отличить.
         history.add(rec("", audio_sec=20.0, error="сеть недоступна", ts=now))
-        assert history.usage(0.04, 10)["today_seconds"] == 0.0
+        history.add(
+            rec("", audio_sec=20.0, error="тишина: уровень 0.002 ниже порога 0.105",
+                ts=now)
+        )
+        history.add(rec("", audio_sec=0.0, error="микрофон не открылся", ts=now))
+
+        stats = history.usage(0.04, 10)
+        assert stats["today_seconds"] == 0.0
+        assert stats["today_count"] == 0.0
+
+    def test_a_paid_failure_is_billed(self, history, now):
+        # Ответ пришёл и оплачен, споткнулись уже на вставке. Раньше такая
+        # диктовка выпадала из расходов целиком, и счётчик в трее занижал
+        # траты тем сильнее, чем чаще не срабатывала вставка.
+        history.add(
+            rec("поставь докер", audio_sec=20.0, error="нет активного окна", ts=now)
+        )
+
+        stats = history.usage(0.04, 10)
+        assert stats["today_seconds"] == 20.0
+        assert stats["today_count"] == 1.0
+
+    def test_a_thrown_away_transcription_is_billed_too(self, history, now):
+        # Чистка убрала выдумку на тишине, вставлять стало нечего — но
+        # ответ провайдера уже получен и оплачен, выброшенное лежит в raw.
+        history.add(
+            rec("", audio_sec=20.0, raw="Субтитры сделал DimaTorzok",
+                error="выдумка на тишине: «Субтитры сделал…», не вставляю", ts=now)
+        )
+
+        assert history.usage(0.04, 10)["today_seconds"] == 20.0
+
+    def test_a_failure_after_refinement_pays_for_both_models(self, history, now):
+        # Правка вернула пустую строку: заплачено и за расшифровку, и за
+        # токены правки — обе строки счёта обязаны остаться на месте.
+        history.add(
+            rec("", audio_sec=9.2, refine_in=218, refine_out=96,
+                error="правка вернула пустой текст, не вставляю", ts=now)
+        )
+
+        stats = history.usage(0.04, 10, 0.15, 0.60)
+        assert stats["today_stt_usd"] == pytest.approx(10 / 3600 * 0.04)
+        assert stats["today_refine_usd"] == pytest.approx(
+            218 / 1e6 * 0.15 + 96 / 1e6 * 0.60
+        )
+
+    def test_three_dictations_with_one_paid_failure(self, history, now):
+        # Разбор запуском: три диктовки, у одной не прошла вставка. В счёт
+        # идут все три — за неудачную заплачено ровно столько же.
+        history.add(rec("первая", audio_sec=20.0, ts=now))
+        history.add(rec("вторая", audio_sec=20.0, error="нет активного окна", ts=now))
+        history.add(rec("третья", audio_sec=20.0, ts=now))
+
+        stats = history.usage(0.04, 10)
+        assert stats["today_count"] == 3.0
+        assert stats["today_seconds"] == 60.0
 
     def test_yesterday_counts_for_the_month_but_not_for_today(self, history, now):
         # Граница суток — локальная полночь, а не «сутки назад».
@@ -220,6 +405,199 @@ class TestUsage:
         stats = history.usage(0.04, 10)
         assert stats["today_seconds"] == 20.0
         assert stats["month_seconds"] == 40.0
+
+
+# Все неудачи, какие умеет класть в историю рабочий поток, — по одной на
+# строку, ровно в том виде, в каком он их пишет. Провайдера в этот момент
+# ещё не спрашивали: звука нет, звук молчит или запрос не доехал.
+UNPAID_FAILURES = [
+    pytest.param(
+        dict(text="", audio_sec=0.0, error="микрофон занят другим приложением"),
+        id="микрофон не открылся",
+    ),
+    pytest.param(
+        dict(
+            text="",
+            audio_sec=0.31,
+            error="микрофон замолчал: держали 30.0 с, записано 0.31 с",
+        ),
+        id="микрофон замолчал посреди фразы",
+    ),
+    pytest.param(
+        dict(
+            text="", audio_sec=30.0, error="тишина: уровень 0.002 ниже порога 0.105"
+        ),
+        id="тишина, отправлять нечего",
+    ),
+    pytest.param(
+        dict(
+            text="",
+            audio_sec=30.0,
+            audio_file="20240612-120000-4231.flac",
+            error="сеть недоступна",
+        ),
+        id="запрос не доехал: ответа нет",
+    ),
+]
+
+# Здесь ответ провайдера уже получен и оплачен, а споткнулись мы после него.
+# Первая строка — та самая, из-за которой признак оплаты и переделан: от
+# ответа не осталось ни знака, и по следам такую запись не опознать.
+PAID_FAILURES = [
+    pytest.param(
+        dict(
+            text="",
+            raw="",
+            audio_sec=30.0,
+            answered=True,
+            error="провайдер вернул пустой ответ",
+        ),
+        id="ответ пустой: следа не осталось",
+    ),
+    pytest.param(
+        dict(
+            text="",
+            raw="Субтитры сделал DimaTorzok",
+            audio_sec=30.0,
+            answered=True,
+            error="выдумка на тишине: «Субтитры сделал…», не вставляю",
+        ),
+        id="выдумку на тишине выбросили",
+    ),
+    pytest.param(
+        dict(
+            text="",
+            raw="поставь докер",
+            refine_in=218,
+            refine_out=96,
+            audio_sec=30.0,
+            answered=True,
+            error="правка вернула пустой текст, не вставляю",
+        ),
+        id="правка вернула пустоту",
+    ),
+    pytest.param(
+        dict(
+            text="Поставь Docker. ",
+            audio_sec=30.0,
+            answered=True,
+            target_exe="notepad.exe",
+            error="нет активного окна",
+        ),
+        id="не прошла вставка",
+    ),
+]
+
+
+class TestPaidFailures:
+    """Счёт идёт по факту «провайдер ответил», а не по остаткам ответа.
+
+    Каждый вид неудачи проверен отдельно: попал он в счёт ровно тогда, когда
+    к провайдеру сходили и ответ получили. Раньше оплату опознавали по следам
+    ответа в записи — тексту, raw, токенам правки, — и один оплаченный вид
+    следа не оставлял вовсе, из-за чего счётчик в трее занижал траты.
+    """
+
+    @pytest.mark.parametrize("fields", UNPAID_FAILURES)
+    def test_a_failure_before_the_answer_is_not_billed(self, history, now, fields):
+        history.add(Record(ts=now, **fields))
+
+        stats = history.usage(0.04, 10)
+        assert stats["today_count"] == 0.0
+        assert stats["today_seconds"] == 0.0
+
+    @pytest.mark.parametrize("fields", PAID_FAILURES)
+    def test_a_failure_after_the_answer_is_billed(self, history, now, fields):
+        history.add(Record(ts=now, **fields))
+
+        stats = history.usage(0.04, 10)
+        assert stats["today_count"] == 1.0
+        assert stats["today_seconds"] == 30.0
+
+    def test_an_empty_answer_is_paid_for_all_the_same(self, history, now):
+        # Тот самый вид, что выпадал из счёта. Ответ провайдера пуст, чистке
+        # нечего чистить, в raw ложится та же пустота — в записи не остаётся
+        # ни одного следа ответа, хотя запрос отработан и оплачен.
+        history.add(
+            rec("", audio_sec=30.0, raw="", answered=True,
+                error="провайдер вернул пустой ответ", ts=now)
+        )
+
+        stats = history.usage(0.04, 10)
+        assert stats["today_count"] == 1.0
+        assert stats["today_seconds"] == 30.0
+
+    def test_six_dictations_with_four_answers(self, history, now):
+        # Разбор запуском, с которого началась правка: шесть диктовок по
+        # 30 с, провайдер ответил на четыре. Счётчик показывал три.
+        history.add(rec("первая", audio_sec=30.0, answered=True, ts=now))
+        history.add(
+            rec("вторая", audio_sec=30.0, answered=True,
+                error="нет активного окна", ts=now)
+        )
+        history.add(
+            rec("", audio_sec=30.0, answered=True, raw="Продолжение следует…",
+                error="выдумка на тишине: «Продолжение следу…», не вставляю", ts=now)
+        )
+        history.add(
+            rec("", audio_sec=30.0, answered=True, raw="",
+                error="провайдер вернул пустой ответ", ts=now)
+        )
+        history.add(rec("", audio_sec=30.0, error="сеть недоступна", ts=now))
+        history.add(
+            rec("", audio_sec=30.0,
+                error="тишина: уровень 0.002 ниже порога 0.105", ts=now)
+        )
+
+        stats = history.usage(0.04, 10)
+        assert stats["today_count"] == 4.0
+        assert stats["today_seconds"] == 120.0
+
+    def test_the_duration_of_the_audio_does_not_decide(self, history, now):
+        # Длительность меряется ДО отправки: у тишины она такая же, как у
+        # диктовки, и признаком оплаты быть не может.
+        history.add(
+            rec("", audio_sec=3.0,
+                error="тишина: уровень 0.002 ниже порога 0.105", ts=now)
+        )
+        history.add(rec("привет", audio_sec=3.0, answered=True, ts=now))
+
+        stats = history.usage(0.04, 10)
+        assert stats["today_count"] == 1.0
+        assert stats["today_seconds"] == 10.0
+
+    def test_the_answer_mark_survives_a_restart(self, tmp_path, cfg, now):
+        # Оплаченная неудача обязана остаться оплаченной и после перезапуска:
+        # счётчик, который меняется сам по себе, уже был отдельной поломкой.
+        path = tmp_path / "history.jsonl"
+        History(path, cfg).add(
+            rec("", audio_sec=30.0, raw="", answered=True,
+                error="провайдер вернул пустой ответ", ts=now)
+        )
+
+        assert History(path, cfg).usage(0.04, 10)["today_count"] == 1.0
+
+    def test_an_old_journal_keeps_its_paid_failures(self, tmp_path, cfg, now):
+        # В журнале, написанном до появления признака, поля нет вовсе. Там
+        # оплату по-прежнему выдаёт след ответа — иначе прошлые траты
+        # обнулились бы задним числом.
+        path = tmp_path / "history.jsonl"
+        lines = [
+            {"ts": now, "text": "поставь докер", "audio_sec": 30.0,
+             "error": "нет активного окна"},
+            {"ts": now, "text": "", "audio_sec": 30.0, "raw": "Субтитры сделал…",
+             "error": "выдумка на тишине: «Субтитры сделал…», не вставляю"},
+            {"ts": now, "text": "", "audio_sec": 30.0,
+             "error": "тишина: уровень 0.002 ниже порога 0.105"},
+        ]
+        path.write_text(
+            "".join(json.dumps(line, ensure_ascii=False) + "\n" for line in lines),
+            encoding="utf-8",
+        )
+
+        history = History(path, cfg)
+        assert [r.answered for r in history.records] == [False, False, False]
+        assert history.usage(0.04, 10)["today_count"] == 2.0
 
 
 class TestFullCost:

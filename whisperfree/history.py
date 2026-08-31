@@ -23,6 +23,18 @@ from pathlib import Path
 log = logging.getLogger(__name__)
 
 
+def _one_line(text: str) -> str:
+    """Схлопывает переносы и лишние пробелы: подпись живёт в одну строку."""
+    return " ".join(text.split())
+
+
+def _shorten(text: str, limit: int) -> str:
+    """Обрезает по многоточию, не выходя за limit знаков."""
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 1)] + "…"
+
+
 @dataclass
 class Record:
     ts: float
@@ -40,17 +52,96 @@ class Record:
     # Токены, потраченные на правку текста моделью.
     refine_in: int = 0
     refine_out: int = 0
+    # Запрос к провайдеру состоялся: ответ получен, значит за эту диктовку
+    # заплачено. Ставится сразу после возврата transcribe(), до чистки и
+    # правки, — дальше от ответа может не остаться ничего, а деньги уже
+    # списаны. Единственный признак оплаты, не зависящий от судьбы текста;
+    # зачем он понадобился — см. _was_paid.
+    answered: bool = False
+
+    # Журнал, в котором запись уже лежит; проставляют History.add и
+    # History._load. Намеренно без аннотации: аннотированное имя стало бы
+    # полем dataclass и уехало бы в JSON.
+    _journal = None
 
     @property
     def when(self) -> datetime:
         return datetime.fromtimestamp(self.ts)
 
     def label(self, width: int = 40) -> str:
-        """Короткая подпись для меню в трее."""
-        text = " ".join(self.text.split())
-        if len(text) > width:
-            text = text[: width - 1] + "…"
+        """Короткая подпись для меню в трее.
+
+        У неудачи текст пустой, и раньше в меню висело «16:40  (пусто)».
+        В трей за историей лезут как раз тогда, когда ничего не вставилось,
+        — и не находили там ответа. Поэтому вместо пустоты показываем
+        причину: в скобках, как в окне истории, чтобы её не приняли за
+        продиктованное. Режем по той же ширине — это пункт меню, а не абзац.
+        """
+        text = _one_line(self.text)
+        if not text and self.error:
+            # Скобки съедают два знака из отведённой ширины.
+            text = f"[{_shorten(_one_line(self.error), width - 2)}]"
+        else:
+            text = _shorten(text, width)
         return f"{self.when:%H:%M}  {text}" if text else f"{self.when:%H:%M}  (пусто)"
+
+    def __setattr__(self, name: str, value) -> None:
+        """Правка уже добавленной записи доходит до диска.
+
+        Причина провала вставки выясняется позже, чем запись попадает в
+        историю: в журнал пишут ДО вставки, чтобы не потерять текст, если
+        приложение упадёт на вставке. Раньше дописанная причина оставалась
+        только в памяти, и одна и та же диктовка до перезапуска из расходов
+        исключалась, а после перезапуска — считалась. Теперь запись, лежащая
+        в журнале, правится вместе с файлом; запись, которой в журнале нет
+        (ещё не добавлена, вытеснена ротацией, история выключена), остаётся
+        обычным объектом и файла не трогает.
+        """
+        journal = self.__dict__.get("_journal")
+        if journal is None or name not in self.__dataclass_fields__:
+            object.__setattr__(self, name, value)
+        else:
+            journal._amend(self, name, value)
+
+
+def _was_paid(record: Record) -> bool:
+    """Платили ли мы за эту диктовку.
+
+    Раньше usage() выбрасывал из счёта любую запись с непустым error, то
+    есть считал «получилось или нет» вместо «платили или нет», и счётчик
+    в трее занижал траты. Часть неудач оплачена: запрос ушёл, ответ пришёл
+    и был оплачен, а споткнулись мы уже после него — не удалась вставка,
+    или после чистки от галлюцинаций (а то и после правки) не осталось
+    текста.
+
+    Платим мы ровно за ответ провайдера, поэтому и признак прямой:
+    record.answered — «ответ получен». Его ставит рабочий поток сразу после
+    возврата transcribe(), и он не зависит от того, что стало с текстом
+    дальше. Не платили ровно за те неудачи, что случились ДО ответа: тишина,
+    мёртвый микрофон, оборванная сеть (короткое касание клавиши в историю не
+    попадает вовсе) — у них answered остаётся False.
+
+    Раньше оплату опознавали по косвенным следам ответа в записи — text, raw,
+    токены правки. След работает, пока от ответа хоть что-то уцелело, и один
+    оплаченный вид неудачи из счёта выпадал: провайдер ответил пустой строкой
+    («провайдер вернул пустой ответ»), чистке нечего было чистить, и в raw
+    легла та же пустота. Ответ получен и оплачен, а следа нет. Проверка
+    запуском это и показала: из шести диктовок провайдер ответил на четыре,
+    а счётчик показывал три.
+
+    Следы оставлены запасным вариантом — для записей, сделанных до появления
+    поля: в старом журнале answered нет, и без запаса прошлые траты
+    обнулились бы задним числом.
+
+    По длительности звука отличить нельзя, хотя она просится первой:
+    audio_sec меряется до отправки, и у записи с тишиной он ровно такой же,
+    как у оплаченной диктовки.
+    """
+    if not record.error:
+        return True
+    if record.answered:
+        return True
+    return bool(record.text or record.raw or record.refine_in or record.refine_out)
 
 
 class History:
@@ -90,14 +181,23 @@ class History:
         except OSError as exc:
             log.warning("не удалось прочитать историю: %s", exc)
             return
+        for record in records:
+            object.__setattr__(record, "_journal", self)
         self._records = records
         log.info("история загружена: %d записей", len(records))
 
-    def add(self, record: Record) -> None:
+    def add(self, record: Record) -> Record:
+        """Кладёт запись в журнал и возвращает её же.
+
+        После add запись остаётся живой: правка её полей — хоть
+        `record.error = ...`, хоть update() — перезапишет файл, так что
+        память и диск не расходятся.
+        """
         if not self.cfg.enabled:
-            return
+            return record
         with self._lock:
             self._records.append(record)
+            object.__setattr__(record, "_journal", self)
             self._cycle_index = 0
             self._cycle_at = 0.0
             try:
@@ -110,6 +210,40 @@ class History:
             self._since_compact += 1
             if self._since_compact >= 50 or len(self._records) > self.cfg.max_records * 1.25:
                 self.compact()
+        return record
+
+    def update(self, record: Record, **fields) -> bool:
+        """Меняет поля уже добавленной записи — и в памяти, и в файле.
+
+        Единственный способ дописать то, что выяснилось после add: причину
+        провала вставки, окно-получатель. Одна перезапись файла на вызов,
+        поэтому несколько полей разом дешевле, чем по одному.
+
+        Возвращает False, если журнал этой записи не хранит: её вытеснила
+        ротация, её не добавляли или история выключена. Тогда правка
+        остаётся только в переданном объекте — и это честно, потому что
+        править на диске нечего.
+        """
+        unknown = set(fields) - set(Record.__dataclass_fields__)
+        if unknown:
+            raise ValueError("нет таких полей в записи: " + ", ".join(sorted(unknown)))
+        with self._lock:
+            changed = False
+            for name, value in fields.items():
+                changed = changed or getattr(record, name) != value
+                object.__setattr__(record, name, value)
+            stored = any(r is record for r in self._records)
+            if changed and stored:
+                self._rewrite(self._records)
+            return stored
+
+    def _amend(self, record: Record, name: str, value) -> None:
+        """Точка входа для `record.поле = значение` из Record.__setattr__."""
+        with self._lock:
+            changed = getattr(record, name) != value
+            object.__setattr__(record, name, value)
+            if changed and any(r is record for r in self._records):
+                self._rewrite(self._records)
 
     def compact(self) -> None:
         """Применяет ограничения по количеству и сроку хранения."""
@@ -163,6 +297,12 @@ class History:
             return self._records[-1] if self._records else None
 
     def search(self, query: str) -> list[Record]:
+        """Ищет по тексту, окну-получателю и причине неудачи.
+
+        Причина здесь обязательна: у неудачной записи текст пустой, поэтому
+        без неё любой непустой запрос прятал бы все неудачи разом — а
+        «когда у меня последний раз молчал микрофон» ищут именно среди них.
+        """
         needle = query.strip().lower()
         with self._lock:
             if not needle:
@@ -170,7 +310,9 @@ class History:
             return [
                 r
                 for r in reversed(self._records)
-                if needle in r.text.lower() or needle in r.target_exe.lower()
+                if needle in r.text.lower()
+                or needle in r.target_exe.lower()
+                or needle in r.error.lower()
             ]
 
     def next_for_paste(self) -> Record | None:
@@ -209,7 +351,11 @@ class History:
         refine_out_price: float = 0.0,
     ) -> dict[str, float]:
         """Оценка расходов. Считает минимальный тарифицируемый отрезок —
-        у Groq короткая диктовка всё равно стоит как десять секунд."""
+        у Groq короткая диктовка всё равно стоит как десять секунд.
+
+        В счёт идут все оплаченные диктовки, в том числе неудачные:
+        почему именно такое условие — см. _was_paid.
+        """
         month_start = datetime.now().replace(
             day=1, hour=0, minute=0, second=0, microsecond=0
         ).timestamp()
@@ -227,8 +373,8 @@ class History:
             )
 
         with self._lock:
-            month = [r for r in self._records if r.ts >= month_start and not r.error]
-            today = [r for r in self._records if r.ts >= today_start and not r.error]
+            month = [r for r in self._records if r.ts >= month_start and _was_paid(r)]
+            today = [r for r in self._records if r.ts >= today_start and _was_paid(r)]
 
         month_seconds, today_seconds = billed(month), billed(today)
         month_refine, today_refine = refine_cost(month), refine_cost(today)
