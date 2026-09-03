@@ -1583,3 +1583,107 @@ class TestRefinementDoesNotCoverTheNextRecording:
         current = app.overlay.begin_session()
         app.overlay.refining(current)
         assert "refining" in app.overlay.states
+
+
+class TestLearningFromCorrections:
+    """Обучение на правках: от нажатия хоткея до изменившегося текста."""
+
+    def correct(self, app, monkeypatch, selection):
+        """Изображает «выделил исправленный текст и нажал хоткей»."""
+        from whisperfree import inject as inject_mod
+
+        monkeypatch.setattr(
+            inject_mod, "copy_selection", lambda **kwargs: selection
+        )
+        app._learn_now(0)
+
+    def test_correction_is_matched_against_history_and_learned(
+        self, app, monkeypatch
+    ):
+        # «редис», а не «докер»: докер в словаре замен из конфига уже есть,
+        # и правильный текст править было бы нечем.
+        app.provider = FakeProvider("поднял редис вчера")
+        app._process(job(app))
+        pasted = app.injector.pasted[-1]
+        assert "редис" in pasted, "конфиг уже исправил слово, учиться нечему"
+
+        self.correct(app, monkeypatch, pasted.replace("редис", "Redis"))
+        assert [item.right for item in app.lexicon.lessons] == ["Redis"]
+        assert app.lexicon.lessons[0].wrong == "редис"
+
+    def test_foreign_selection_teaches_nothing(self, app, monkeypatch):
+        app.provider = FakeProvider("поставил докер вчера")
+        app._process(job(app))
+
+        self.correct(app, monkeypatch, "Совершенно посторонний текст из письма.")
+        assert app.lexicon.lessons == []
+
+    def test_empty_selection_teaches_nothing(self, app, monkeypatch):
+        app._process(job(app))
+        self.correct(app, monkeypatch, "")
+        assert app.lexicon.lessons == []
+
+    def test_learned_term_reaches_the_recognition_prompt(self, app):
+        app.lexicon.learn("поднял редис", "поднял Redis")
+        app._process(job(app))
+        assert "Redis" in app.provider.requests[-1].prompt
+
+    def test_confirmed_correction_changes_the_pasted_text(self, app, monkeypatch):
+        # Первая правка — только подсказка, вторая делает замену, и текст
+        # начинает выходить правильным сам.
+        app.provider = FakeProvider("поднял редис вчера")
+        for _ in range(2):
+            app._process(job(app))
+            pasted = app.injector.pasted[-1]
+            self.correct(app, monkeypatch, pasted.replace("редис", "Redis"))
+
+        app._process(job(app))
+        assert "Redis" in app.injector.pasted[-1]
+        assert "редис" not in app.injector.pasted[-1]
+
+    def test_model_mistakes_are_reported_to_the_editor(self, app):
+        app.lexicon.learn("поднял редис", "поднял Redis", raw="поднял Redis")
+        app._apply_lexicon()
+        assert "Redis" in app.refiner.prompt
+        # Исходная инструкция при этом никуда не делась.
+        assert "редактор расшифровки" in app.refiner.prompt
+
+    def test_editor_prompt_does_not_grow_with_every_lesson(self, app):
+        app.lexicon.learn("поднял редис", "поднял Redis", raw="поднял Redis")
+        app._apply_lexicon()
+        once = len(app.refiner.prompt)
+        app._apply_lexicon()
+        app._apply_lexicon()
+        assert len(app.refiner.prompt) == once, "список написаний приписался дважды"
+
+    def test_forgetting_removes_the_rule_at_once(self, app, monkeypatch):
+        app.lexicon.learn("поднял редис", "поднял Redis")
+        app.lexicon.learn("снёс редис", "снёс Redis")
+        app._apply_lexicon()
+        app.provider = FakeProvider("поднял редис вчера")
+        app._process(job(app))
+        assert "Redis" in app.injector.pasted[-1]
+
+        app.lexicon.forget("редис", "Redis")
+        app._apply_lexicon()
+        app._process(job(app))
+        assert "редис" in app.injector.pasted[-1], "забытое правило продолжает работать"
+
+    def test_prompt_stays_within_the_provider_limit(self, app):
+        from whisperfree import lexicon as lexicon_mod
+        from whisperfree.__main__ import WHISPER_PROMPT_TOKENS
+
+        # Затравка из конфига уже длинная, а выученного пусть будет много.
+        for index in range(60):
+            app.lexicon.learn(f"термин{index} тут", f"Term{index} тут")
+        prompt = app._stt_prompt("ru")
+        assert lexicon_mod.estimate_tokens(prompt) <= WHISPER_PROMPT_TOKENS
+
+    def test_learning_can_be_switched_off_entirely(self, app, monkeypatch):
+        app.cfg.lexicon.enabled = False
+        app.provider = FakeProvider("поставил докер вчера")
+        app._process(job(app))
+        self.correct(
+            app, monkeypatch, app.injector.pasted[-1].replace("докер", "Docker")
+        )
+        assert app.lexicon.lessons == []

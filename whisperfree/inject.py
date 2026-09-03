@@ -349,6 +349,90 @@ def wait_modifiers_released(timeout_ms: int = 400) -> bool:
     return not modifiers_down()
 
 
+# Метка, которую кладём в буфер перед Ctrl+C. Без неё «ничего не выделено»
+# неотличимо от «выделено то же, что уже лежало в буфере»: мы прочитали бы
+# старое содержимое и приняли его за выделение — а значит, начали бы учиться
+# на тексте, которого человек не выделял. Символы U+2060 взяты потому, что
+# в живом тексте их не бывает.
+_PROBE = "⁠whisperfree⁠"
+
+
+def copy_key_for(exe: str, default_paste: str, overrides: dict[str, str]) -> str:
+    """Сочетание копирования для конкретного приложения.
+
+    Выводится из клавиши вставки, а не задаётся второй таблицей. Причина не в
+    экономии: в терминале Ctrl+C — это вовсе не копирование, а прерывание
+    запущенной программы, и послать его туда значило бы убить человеку работу.
+    Там, где вставка идёт через Ctrl+Shift+V, копирование — Ctrl+Shift+C, и
+    список таких приложений в конфиге уже есть.
+    """
+    parts = [p.strip() for p in paste_key_for(exe, default_paste, overrides).split("+")]
+    parts = [p for p in parts if p]
+    if not parts:
+        return "ctrl+c"
+    return "+".join(parts[:-1] + ["c"])
+
+
+def copy_selection(
+    combo: str = "ctrl+c", timeout_ms: int = 600, wait_modifiers_ms: int = 400
+) -> str | None:
+    """Текст, выделенный в активном окне. None — ничего не выделено.
+
+    Спросить у чужого окна напрямую нельзя: Windows не даёт доступа к
+    выделению в приложении, которое мы не писали. Поэтому единственный
+    общий способ — послать сочетание копирования и прочитать буфер.
+
+    Плата за это — буфер обмена. Прежнее текстовое содержимое мы возвращаем,
+    но если там лежала картинка, она пропадёт: EmptyClipboard забирает всё
+    целиком, а положить картинку обратно мы не умеем.
+    """
+    previous = get_clipboard_text()
+
+    # Хоткей нажимают с зажатыми модификаторами, и Ctrl+C, посланный поверх
+    # них, превратился бы в Ctrl+Alt+C — сочетание, которое чужое окно
+    # понимает как что угодно, только не как «копировать».
+    wait_modifiers_released(wait_modifiers_ms)
+    if not has_foreground_window():
+        return None
+
+    if not set_clipboard_text(_PROBE):
+        log.warning("буфер обмена занят — выделение прочитать не удалось")
+        return None
+
+    if not send_combo(combo):
+        _restore(previous)
+        return None
+
+    # Сочетание доходит до окна не мгновенно, и большое выделение окно кладёт
+    # в буфер не за один такт. Поэтому ждём смены метки, а не спим наугад.
+    deadline = time.monotonic() + timeout_ms / 1000.0
+    selection: str | None = None
+    while time.monotonic() < deadline:
+        time.sleep(0.02)
+        current = get_clipboard_text()
+        if current is not None and current != _PROBE:
+            selection = current
+            break
+
+    _restore(previous)
+    if selection is None:
+        log.debug("после %s буфер не изменился — выделения нет", combo)
+    return selection
+
+
+def _restore(previous: str | None) -> None:
+    """Возвращает прежний текст в буфер.
+
+    Когда прежнего текста не было, кладём пустую строку, а не оставляем всё
+    как есть: иначе в буфере осталась бы наша метка, и человек вставил бы
+    в документ «whisperfree».
+    """
+    try:
+        set_clipboard_text(previous if previous is not None else "")
+    except Exception as exc:  # pragma: no cover
+        log.debug("не удалось вернуть буфер обмена: %s", exc)
+
+
 def type_unicode(text: str, chunk: int = 40, delay: float = 0.003) -> bool:
     """Посимвольный ввод — запасной путь, когда буфер трогать нельзя."""
     ok = True

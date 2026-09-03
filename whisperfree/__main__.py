@@ -25,9 +25,11 @@ from pathlib import Path
 
 from . import audio as audio_mod
 from . import autostart, config as config_mod, inject
+from . import lexicon as lexicon_mod
 from .history import AudioCache, History, Record
 from .history_window import HistoryWindow
 from .hotkey import HotkeyManager
+from .lexicon_window import LexiconWindow
 from .logutil import Stopwatch, setup_logging
 from .overlay import Overlay
 from .postprocess import Postprocessor
@@ -39,6 +41,13 @@ from .theme import load_themes, pick
 from .tray import Tray
 
 log = logging.getLogger(__name__)
+
+# Предел затравки распознавания у Whisper — 224 токена на всё вместе с тем,
+# что задано в конфиге. Обрезанная затравка теряет хвост молча, поэтому
+# выученным терминам отдаётся только то, что осталось, и ещё с запасом:
+# длина в токенах здесь считается прикидкой, а не токенизатором.
+WHISPER_PROMPT_TOKENS = 224
+PROMPT_MARGIN_TOKENS = 8
 
 # Запасное значение порога тишины, если в конфиге его нет.
 # Отправлять тишину бессмысленно и вредно: Whisper на ней уверенно выдумывает
@@ -106,6 +115,11 @@ class App:
         )
         self.postprocessor = Postprocessor(cfg.postprocess)
         self.refiner = Refiner(cfg.refine, cfg.provider.base_url, cfg.provider.api_key)
+        # Затравку редактора храним отдельно: к ней дописывается список
+        # выученных написаний, и дописывать надо всегда к исходной, а не к
+        # уже дописанной — иначе список растёт с каждым уроком.
+        self._editor_prompt = self.refiner.prompt
+        self.lexicon = lexicon_mod.Lexicon(config_mod.lexicon_path(), cfg.lexicon)
         self.injector = inject.Injector(cfg.inject)
         self.provider = build_provider(cfg.provider)
         self.recorder = audio_mod.Recorder(
@@ -135,6 +149,12 @@ class App:
         self.history_window = HistoryWindow(
             self.root, self.history, self._paste_record, self._copy_record
         )
+        self.lexicon_window = LexiconWindow(
+            self.root, self.lexicon, on_change=self._apply_lexicon
+        )
+        # Раскладываем выученное по местам сразу: без этого первая диктовка
+        # после запуска шла бы без всего, чему программа успела научиться.
+        self._apply_lexicon()
         self.tray: Tray | None = None
         self._worker: threading.Thread | None = None
 
@@ -190,6 +210,8 @@ class App:
                 themes=self.themes,
                 current_theme=lambda: self.overlay.theme.id,
                 on_theme=self._switch_theme,
+                on_open_lexicon=self.lexicon_window.open,
+                lexicon_count=lambda: len(self.lexicon),
             )
             self.tray.start()
 
@@ -290,6 +312,10 @@ class App:
         self.hotkeys.register_combo(cfg.paste_last, self._paste_last)
         if cfg.open_history:
             self.hotkeys.register_combo(cfg.open_history, self.history_window.open)
+        if cfg.learn:
+            self.hotkeys.register_combo(cfg.learn, self._learn_from_selection)
+        if cfg.open_lexicon:
+            self.hotkeys.register_combo(cfg.open_lexicon, self.lexicon_window.open)
 
     def toggle_pause(self) -> None:
         self.paused = not self.paused
@@ -893,7 +919,7 @@ class App:
                     audio=data,
                     filename=filename,
                     language=job.lang,
-                    prompt=self.cfg.language.prompt_for(job.lang),
+                    prompt=self._stt_prompt(job.lang),
                     duration_s=job.capture.duration_s,
                 )
             )
@@ -1068,6 +1094,100 @@ class App:
         if self.tray is not None:
             self.tray.refresh()
 
+    # --- обучение на правках ---------------------------------------------------
+
+    def _stt_prompt(self, lang: str) -> str:
+        """Затравка распознавания: заданная в конфиге плюс выученные термины."""
+        base = self.cfg.language.prompt_for(lang)
+        room = (
+            WHISPER_PROMPT_TOKENS
+            - lexicon_mod.estimate_tokens(base)
+            - PROMPT_MARGIN_TOKENS
+        )
+        budget = min(self.cfg.lexicon.prompt_budget_tokens, max(0, room))
+        return lexicon_mod.build_prompt(base, self.lexicon.vocabulary(lang, budget))
+
+    def _apply_lexicon(self) -> None:
+        """Раскладывает выученное по трём местам, где оно работает.
+
+        Зовётся на старте, после каждого урока и после «забыть»: правка,
+        которую человек только что отменил, не должна дожить до перезапуска.
+        Затравка распознавания собирается на каждую диктовку сама и здесь не
+        нужна — см. _stt_prompt.
+        """
+        self.postprocessor.set_learned(self.lexicon.replacements())
+        self.refiner.prompt = lexicon_mod.build_editor_prompt(
+            self._editor_prompt, self.lexicon.editor_notes()
+        )
+
+    def _learn_from_selection(self) -> None:
+        """Хоткей обучения: запомнить, как человек поправил вставленный текст.
+
+        Работа уходит в отдельный поток. Прочитать выделение можно только
+        через Ctrl+C и ожидание буфера — до секунды, — а обработчик хука
+        обязан вернуться за единицы миллисекунд: иначе Windows сначала
+        тормозит всю клавиатуру, а потом молча снимает хук.
+        """
+        session = self._take_plate()
+        threading.Thread(
+            target=self._learn_now, args=(session,), name="lexicon-learn", daemon=True
+        ).start()
+
+    def _learn_now(self, session: int) -> None:
+        if not self.cfg.lexicon.enabled:
+            self.overlay.error("обучение выключено в конфиге", session)
+            return
+
+        # Клавишу копирования берём по приложению-получателю: в терминале
+        # Ctrl+C прервал бы запущенную там программу.
+        selection = inject.copy_selection(
+            combo=inject.copy_key_for(
+                inject.foreground_exe(),
+                self.cfg.inject.default_paste,
+                self.cfg.inject.paste_overrides,
+            ),
+            wait_modifiers_ms=self.cfg.inject.wait_modifiers_ms,
+        )
+        if not selection or not selection.strip():
+            self.overlay.error("выделите исправленный текст", session)
+            return
+
+        # Ищем по похожести, а не по времени: правя текст, человек мог сходить
+        # в другое окно и продиктовать что-то ещё. Заодно так отсекается
+        # случай, когда выделили вообще не нашу диктовку.
+        record, ratio = lexicon_mod.find_source(
+            selection, self.history.recent(30), self.cfg.lexicon.min_match
+        )
+        if record is None:
+            log.info(
+                "обучение: выделенное не похоже ни на одну диктовку "
+                "(лучшее совпадение %.0f%%)", ratio * 100,
+            )
+            self.overlay.error("не нашёл эту диктовку в истории", session)
+            return
+
+        learned, refused = self.lexicon.learn(
+            record.text,
+            selection,
+            raw=record.raw,
+            lang=record.lang,
+            dictionary=self.cfg.postprocess.replacements,
+        )
+        for line in refused:
+            log.info("обучение отклонило %s", line)
+
+        if not learned:
+            reason = refused[0] if refused else "различий не нашёл"
+            log.info("обучение: ничего не запомнил — %s", reason)
+            self.overlay.error(_learn_failure(refused), session)
+            return
+
+        self._apply_lexicon()
+        for lesson in learned:
+            log.info("выучил: %s", self.lexicon.describe(lesson))
+        self._refresh_tray()
+        self.overlay.ok(_learn_report(learned), session)
+
     # --- повторная вставка -----------------------------------------------------
 
     def _paste_last(self) -> None:
@@ -1120,6 +1240,28 @@ class App:
             self.overlay.ok("скопировано в буфер", session)
         else:
             self.overlay.error("не удалось положить в буфер", session)
+
+
+def _learn_report(learned: list) -> str:
+    """Короткая строка для плашки: что именно программа запомнила.
+
+    В плашку влезает 34 знака, поэтому при нескольких правках показываем
+    первую и число остальных — подробности всё равно в логе и в окне.
+    """
+    first = f"{learned[0].wrong} → {learned[0].right}"
+    if len(learned) == 1:
+        return f"выучил: {first}"
+    return f"выучил {len(learned)}: {first}…"
+
+
+def _learn_failure(refused: list[str]) -> str:
+    """Почему ничего не запомнилось. Человек нажал клавишу и ждёт ответа."""
+    if not refused:
+        return "правок не вижу: текст совпадает"
+    # В сообщении оставляем только причину: пара «было → стало» в него не
+    # влезает, а в логе она есть целиком.
+    reason = refused[0].split(": ", 1)[-1]
+    return f"не запомнил: {reason}"
 
 
 # --- вспомогательные режимы ----------------------------------------------------
@@ -1226,6 +1368,54 @@ def _force_utf8_output() -> None:
                 stream.reconfigure(encoding="utf-8", errors="replace")
         except (ValueError, OSError):  # pragma: no cover
             pass
+
+
+def cmd_lexicon(cfg: config_mod.Config) -> int:
+    """Печатает выученные правки: что, кто испортил и как применяется."""
+    path = config_mod.lexicon_path()
+    lex = lexicon_mod.Lexicon(path, cfg.lexicon)
+    lessons = sorted(lex.lessons, key=lambda item: (-item.hits, -item.last_ts))
+
+    print(f"Файл: {path}")
+    if not cfg.lexicon.enabled:
+        print("Обучение выключено: [lexicon].enabled = false")
+    if not lessons:
+        print()
+        print("Пока ничего не выучено.")
+        print(
+            f"Поправьте вставленный текст, выделите его и нажмите "
+            f"{cfg.hotkeys.learn or '(хоткей не задан)'}."
+        )
+        return 0
+
+    rules = [item for item in lessons if lex.is_rule(item)]
+    print(f"Выучено: {len(lessons)}, из них работают заменой: {len(rules)}")
+    print()
+    width = max(len(item.wrong) for item in lessons)
+    for item in lessons:
+        mark = "замена   " if lex.is_rule(item) else "подсказка"
+        print(
+            f"  {item.wrong:<{width}}  ->  {item.right:<{width}}  "
+            f"{mark}  x{item.hits}  {item.blame_ru}"
+        )
+
+    by_blame: dict[str, int] = {}
+    for item in lessons:
+        by_blame[item.blame_ru] = by_blame.get(item.blame_ru, 0) + item.hits
+    print()
+    print("Откуда берутся ошибки (по числу правок):")
+    for reason, count in sorted(by_blame.items(), key=lambda pair: -pair[1]):
+        print(f"  {count:>4}  {reason}")
+
+    terms = lex.vocabulary(cfg.language.main)
+    if terms:
+        print()
+        print(f"В затравку распознавания уходит {len(terms)}: {', '.join(terms)}")
+    notes = lex.editor_notes()
+    if notes:
+        print()
+        print(f"Модели-редактору сообщается: {'; '.join(notes)}")
+    return 0
 
 
 def cmd_calibrate(cfg: config_mod.Config, seconds: float = 3.0) -> int:
@@ -1349,6 +1539,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--limits", action="store_true", help="остаток бесплатных лимитов провайдера"
     )
+    parser.add_argument(
+        "--lexicon", action="store_true", help="показать выученные правки"
+    )
     parser.add_argument("--debug", action="store_true", help="подробный лог")
     args = parser.parse_args(argv)
 
@@ -1378,6 +1571,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_check(cfg)
     if args.calibrate is not None:
         return cmd_calibrate(cfg, args.calibrate)
+    if args.lexicon:
+        return cmd_lexicon(cfg)
     if args.limits:
         return report_limits(cfg)
     if args.paste_test is not None:

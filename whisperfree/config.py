@@ -61,6 +61,13 @@ def history_path() -> Path:
     return app_dir() / "history.jsonl"
 
 
+def lexicon_path() -> Path:
+    """Выученные правки. Отдельный файл, а не секция конфига: конфиг человек
+    правит руками, и подмешивать туда машинные записи — верный способ
+    однажды затереть его комментарии."""
+    return app_dir() / "lexicon.json"
+
+
 def log_path() -> Path:
     return app_dir() / "logs" / "whisperfree.log"
 
@@ -132,6 +139,17 @@ paste_last = "ctrl+alt+v"
 
 # Открыть окно истории. Пустая строка — выключить.
 open_history = "ctrl+alt+h"
+
+# Запомнить правку. Поправьте вставленный текст руками, выделите его и
+# нажмите — программа сравнит со своим вариантом и запомнит разницу.
+# Пустая строка — выключить.
+learn = "ctrl+alt+u"
+
+# Показать выученные правки. По умолчанию выключено, и не случайно:
+# сочетания не подавляются, то есть доходят и до программы, и до окна под
+# курсором, а ctrl+alt+l в средах JetBrains — это «переформатировать код».
+# Список и так доступен из трея и через lexicon.bat.
+open_lexicon = ""
 
 # Прятать клавишу диктовки от приложения под курсором.
 # Работает только для выделенных клавиш (f13..f24, scroll_lock, pause, caps_lock).
@@ -262,6 +280,52 @@ price_out_per_mtok = 0.60
 # Пустая строка — встроенная инструкция. Своя заменяет её целиком.
 prompt = ""
 
+[lexicon]
+# Учиться на ваших правках. Поправили вставленный текст, выделили, нажали
+# [hotkeys].learn — программа запомнила разницу и больше так не ошибается.
+enabled = true
+
+# Выученное подсказывается распознаванию (затравкой) и модели-редактора
+# (списком написаний). Это безопасно всегда: подсказка ничего не заменяет,
+# она лишь склоняет выбор в нужную сторону.
+teach_recognizer = true
+teach_editor = true
+
+# Создавать из выученного детерминированные замены, как в
+# [postprocess.replacements]. Замена применяется ко ВСЕМУ будущему тексту,
+# поэтому программа создаёт её только там, где правило верно в любом
+# предложении: смена алфавита («докер» → Docker) и заглавная внутри слова
+# («Github» → «GitHub»).
+# Правки внутри одного алфавита правилами не становятся никогда — и «был», и
+# «были» настоящие слова, и глобальная замена одного на другое сломала бы текст.
+# Ё и Е при этом РАЗНЫЕ буквы: «все» → «всё» — самая частая правка в живой
+# истории, и заменой она стать не должна, иначе «все пришли» станет
+# «всё пришли».
+rules = true
+
+# Сколько раз надо поправить одно и то же, чтобы появилась замена.
+# Единица означает «с первого раза»; двойка защищает от случая, когда вы
+# перевели слово на английский один раз для конкретной фразы.
+min_hits_for_rule = 2
+
+# Сколько токенов затравки распознавания отдать выученным терминам.
+# Затравка Whisper целиком ограничена 224 токенами вместе с prompt_ru.
+prompt_budget_tokens = 90
+
+# Сколько написаний перечислять модели-редактору.
+editor_notes = 12
+
+# Предел числа выученных правок. Сверх него забываются редкие и давние.
+max_entries = 300
+
+# Больше этого числа замен за одно нажатие — значит, текст переписан заново,
+# а не поправлен, и учиться там нечему.
+max_per_press = 5
+
+# Насколько выделенный текст должен быть похож на записанную диктовку, чтобы
+# программа признала их одним и тем же текстом.
+min_match = 0.62
+
 [inject]
 # clipboard — быстро и надёжно. unicode — посимвольно, если буфер трогать нельзя.
 method = "clipboard"
@@ -315,6 +379,8 @@ class HotkeysConfig:
     dictate_alt: str = ""
     paste_last: str = "ctrl+alt+v"
     open_history: str = "ctrl+alt+h"
+    learn: str = "ctrl+alt+u"
+    open_lexicon: str = ""
     suppress: bool = True
 
 
@@ -387,6 +453,20 @@ class RefineConfig:
 
 
 @dataclass
+class LexiconConfig:
+    enabled: bool = True
+    teach_recognizer: bool = True
+    teach_editor: bool = True
+    rules: bool = True
+    min_hits_for_rule: int = 2
+    prompt_budget_tokens: int = 90
+    editor_notes: int = 12
+    max_entries: int = 300
+    max_per_press: int = 5
+    min_match: float = 0.62
+
+
+@dataclass
 class InjectConfig:
     method: str = "clipboard"
     restore_clipboard: bool = True
@@ -426,6 +506,7 @@ class Config:
     language: LanguageConfig = field(default_factory=LanguageConfig)
     postprocess: PostprocessConfig = field(default_factory=PostprocessConfig)
     refine: RefineConfig = field(default_factory=RefineConfig)
+    lexicon: LexiconConfig = field(default_factory=LexiconConfig)
     inject: InjectConfig = field(default_factory=InjectConfig)
     history: HistoryConfig = field(default_factory=HistoryConfig)
     ui: UIConfig = field(default_factory=UIConfig)
@@ -466,6 +547,7 @@ def parse_config(data: dict[str, Any], path: Path | None = None) -> Config:
             },
         ),
         refine=_build(RefineConfig, _section(data, "refine")),
+        lexicon=_build(LexiconConfig, _section(data, "lexicon")),
         inject=_build(
             InjectConfig,
             inject_raw,

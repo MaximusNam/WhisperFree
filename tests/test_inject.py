@@ -12,6 +12,8 @@ from whisperfree.inject import (
     VK_RETURN,
     VK_SHIFT,
     _utf16_units,
+    copy_key_for,
+    copy_selection,
     parse_combo,
     paste_key_for,
 )
@@ -110,3 +112,160 @@ class TestUtf16:
         assert len(units) == 2
         assert 0xD800 <= units[0] <= 0xDBFF
         assert 0xDC00 <= units[1] <= 0xDFFF
+
+
+class FakeClipboard:
+    """Буфер обмена и Ctrl+C без Windows.
+
+    Ctrl+C изображается так же, как ведёт себя настоящий: он кладёт в буфер
+    выделение, если оно есть, и не делает ничего, если его нет.
+    """
+
+    def __init__(self, initial=None, selection=None, copy_works=True):
+        self.content = initial
+        self.selection = selection
+        self.copy_works = copy_works
+        self.history = []
+
+    def install(self, monkeypatch):
+        from whisperfree import inject as inject_mod
+
+        monkeypatch.setattr(inject_mod, "get_clipboard_text", lambda: self.content)
+        monkeypatch.setattr(inject_mod, "set_clipboard_text", self._set)
+        monkeypatch.setattr(inject_mod, "send_combo", self._copy)
+        monkeypatch.setattr(inject_mod, "has_foreground_window", lambda: True)
+        monkeypatch.setattr(
+            inject_mod, "wait_modifiers_released", lambda timeout_ms=400: True
+        )
+        return self
+
+    def _set(self, text):
+        self.content = text
+        self.history.append(text)
+        return True
+
+    def _copy(self, spec):
+        assert spec == "ctrl+c"
+        if not self.copy_works:
+            return False
+        if self.selection is not None:
+            self.content = self.selection
+        return True
+
+
+class TestCopySelection:
+    """Прочитать выделение можно только через буфер, и это надо делать честно."""
+
+    def test_selection_is_returned(self, monkeypatch):
+        clip = FakeClipboard(initial="было в буфере", selection="выделенное").install(
+            monkeypatch
+        )
+        assert copy_selection() == "выделенное"
+
+    def test_previous_clipboard_is_restored(self, monkeypatch):
+        clip = FakeClipboard(initial="было в буфере", selection="выделенное").install(
+            monkeypatch
+        )
+        copy_selection()
+        assert clip.content == "было в буфере"
+
+    def test_nothing_selected_is_not_mistaken_for_the_old_clipboard(self, monkeypatch):
+        # Самый опасный случай: человек ничего не выделил. Без метки в буфере
+        # мы прочитали бы прежнее его содержимое и стали бы учиться на тексте,
+        # которого он не выделял.
+        clip = FakeClipboard(initial="старый текст", selection=None).install(monkeypatch)
+        assert copy_selection() is None
+        assert clip.content == "старый текст"
+
+    def test_selection_equal_to_the_clipboard_is_still_seen(self, monkeypatch):
+        # Обратный случай: выделено ровно то, что уже лежало в буфере.
+        # Метка отличается от обоих, поэтому смена видна.
+        clip = FakeClipboard(initial="один и тот же", selection="один и тот же").install(
+            monkeypatch
+        )
+        assert copy_selection() == "один и тот же"
+
+    def test_probe_never_stays_in_the_clipboard(self, monkeypatch):
+        clip = FakeClipboard(initial=None, selection=None).install(monkeypatch)
+        copy_selection()
+        assert clip.content == "", "в буфере осталась служебная метка"
+
+    def test_failed_copy_restores_the_clipboard(self, monkeypatch):
+        clip = FakeClipboard(
+            initial="важное", selection="выделенное", copy_works=False
+        ).install(monkeypatch)
+        assert copy_selection() is None
+        assert clip.content == "важное"
+
+    def test_no_window_means_no_reading(self, monkeypatch):
+        from whisperfree import inject as inject_mod
+
+        clip = FakeClipboard(initial="важное", selection="выделенное").install(monkeypatch)
+        monkeypatch.setattr(inject_mod, "has_foreground_window", lambda: False)
+        assert copy_selection() is None
+        assert clip.content == "важное", "буфер тронули, хотя окна нет"
+
+    def test_the_combo_is_passed_through(self, monkeypatch):
+        from whisperfree import inject as inject_mod
+
+        sent = []
+        clip = FakeClipboard(initial=None, selection="текст").install(monkeypatch)
+        monkeypatch.setattr(
+            inject_mod,
+            "send_combo",
+            lambda spec: sent.append(spec) or clip._set(clip.selection) or True,
+        )
+        copy_selection(combo="ctrl+shift+c")
+        assert sent == ["ctrl+shift+c"]
+
+    def test_modifiers_are_awaited_before_sending_ctrl_c(self, monkeypatch):
+        # Хоткей нажимают с зажатыми Ctrl+Alt, и Ctrl+C поверх них стал бы
+        # Ctrl+Alt+C — сочетанием, которое чужое окно поймёт как угодно.
+        from whisperfree import inject as inject_mod
+
+        order = []
+        clip = FakeClipboard(initial=None, selection="текст").install(monkeypatch)
+        monkeypatch.setattr(
+            inject_mod,
+            "wait_modifiers_released",
+            lambda timeout_ms=400: order.append("wait") or True,
+        )
+        real_copy = clip._copy
+        monkeypatch.setattr(
+            inject_mod, "send_combo", lambda spec: order.append("copy") or real_copy(spec)
+        )
+        copy_selection()
+        assert order == ["wait", "copy"]
+
+
+class TestCopyKeyForApp:
+    """В терминале Ctrl+C прерывает программу, а не копирует."""
+
+    TERMINALS = {
+        "WindowsTerminal.exe": "ctrl+shift+v",
+        "wt.exe": "ctrl+shift+v",
+        "mintty.exe": "ctrl+shift+v",
+    }
+
+    def test_ordinary_app_gets_plain_ctrl_c(self):
+        assert copy_key_for("notepad.exe", "ctrl+v", self.TERMINALS) == "ctrl+c"
+
+    @pytest.mark.parametrize("exe", ["WindowsTerminal.exe", "wt.exe", "mintty.exe"])
+    def test_terminal_gets_ctrl_shift_c(self, exe):
+        # Иначе выделенный текст не скопируется, зато у человека умрёт
+        # запущенная в терминале программа.
+        assert copy_key_for(exe, "ctrl+v", self.TERMINALS) == "ctrl+shift+c"
+
+    def test_match_is_case_insensitive(self):
+        assert copy_key_for("windowsterminal.exe", "ctrl+v", self.TERMINALS) == (
+            "ctrl+shift+c"
+        )
+
+    def test_key_is_derived_from_whatever_the_user_configured(self):
+        # Таблица одна: добавив своё приложение в paste_overrides, человек
+        # получает верную клавишу копирования без второй настройки.
+        overrides = {"myeditor.exe": "ctrl+alt+shift+v"}
+        assert copy_key_for("myeditor.exe", "ctrl+v", overrides) == "ctrl+alt+shift+c"
+
+    def test_empty_default_falls_back_to_ctrl_c(self):
+        assert copy_key_for("notepad.exe", "", {}) == "ctrl+c"

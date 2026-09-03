@@ -420,3 +420,44 @@ class TestShippedExample:
         example = Path(__file__).resolve().parent.parent / "config.example.toml"
         raw = example.read_bytes()
         assert b"\r\n" not in raw
+
+
+class TestPersonalFilesStayOutOfTheRepository:
+    """Всё, что программа пишет о своём хозяине, обязано быть в .gitignore.
+
+    В переносимом режиме эти файлы ложатся не в %APPDATA%, а прямо рядом с
+    программой — то есть внутрь рабочей копии. Репозиторий публичный, и один
+    незакрытый файл выкладывает наружу личное: history.jsonl хранит все
+    диктовки целиком, lexicon.json — слова, которые человек говорил и правил,
+    logs при --debug тоже пишут текст диктовок и абсолютные пути.
+
+    Проверка структурная нарочно: она поймёт и следующий такой файл, если он
+    появится, а не только те три, что есть сейчас.
+    """
+
+    @pytest.fixture
+    def ignored(self):
+        from pathlib import Path
+
+        text = (Path(__file__).resolve().parent.parent / ".gitignore").read_text(
+            encoding="utf-8"
+        )
+        return {line.strip() for line in text.splitlines() if line.strip()}
+
+    @pytest.mark.parametrize(
+        "helper",
+        ["config_path", "history_path", "lexicon_path", "log_path", "audio_cache_dir"],
+    )
+    def test_every_written_file_is_ignored(self, helper, ignored, monkeypatch, tmp_path):
+        monkeypatch.setattr(config_mod, "app_dir", lambda: tmp_path)
+        path = getattr(config_mod, helper)()
+        # Каталог закрывают записью со слешем, файл — своим именем.
+        assert (
+            path.name in ignored
+            or f"{path.name}/" in ignored
+            or path.parent.name + "/" in ignored
+        ), f"{path.name} пишется программой, но не закрыт в .gitignore"
+
+    def test_the_key_file_is_ignored(self, ignored):
+        assert ".env" in ignored
+        assert "!.env.example" in ignored, "пример .env должен остаться в репозитории"

@@ -679,3 +679,103 @@ class TestHistoryWindow:
         window.open()
         pump(root)
         assert window._window is first
+
+
+class TestLexiconWindow:
+    """Окно выученных правок: обучение обязано быть видимым и обратимым."""
+
+    @pytest.fixture
+    def lex(self, tmp_path):
+        from whisperfree.config import LexiconConfig
+        from whisperfree.lexicon import Lexicon
+
+        lexicon = Lexicon(tmp_path / "lexicon.json", LexiconConfig())
+        # Испортила модель — такую правку в окне видно цветом.
+        lexicon.learn("поднял редис", "поднял Redis", raw="поднял Redis")
+        lexicon.learn("снёс редис", "снёс Redis", raw="снёс Redis")
+        # Не расслышал микрофон, и правилом замены это не станет никогда.
+        lexicon.learn("к сожелению", "к сожалению")
+        return lexicon
+
+    def window(self, root, lex, on_change=None):
+        from whisperfree.lexicon_window import LexiconWindow
+
+        win = LexiconWindow(root, lex, on_change=on_change)
+        win.open()
+        pump(root)
+        return win
+
+    def test_opens_and_lists_lessons(self, root, lex):
+        win = self.window(root, lex)
+        assert win._tree is not None
+        assert len(win._tree.get_children()) == 2
+
+    def test_frequent_lesson_comes_first(self, root, lex):
+        win = self.window(root, lex)
+        first = win._tree.get_children()[0]
+        assert win._tree.item(first, "values")[1] == "Redis"
+
+    def test_model_mistakes_are_marked(self, root, lex):
+        win = self.window(root, lex)
+        first = win._tree.get_children()[0]
+        assert "refine" in win._tree.item(first, "tags")
+
+    def test_rule_and_hint_are_shown_differently(self, root, lex):
+        win = self.window(root, lex)
+        rows = {
+            win._tree.item(iid, "values")[1]: win._tree.item(iid, "values")[3]
+            for iid in win._tree.get_children()
+        }
+        assert rows["Redis"] == "замена"
+        # Правкой внутри одного алфавита замена не станет, и обещать её нельзя.
+        assert rows["сожалению"] == "подсказка"
+
+    def test_blame_is_written_in_words(self, root, lex):
+        win = self.window(root, lex)
+        blames = {
+            win._tree.item(iid, "values")[2] for iid in win._tree.get_children()
+        }
+        assert "испортила правка моделью" in blames
+
+    def test_forgetting_removes_the_row_and_tells_the_app(self, root, lex):
+        called = []
+        win = self.window(root, lex, on_change=lambda: called.append(True))
+        win._tree.selection_set(win._tree.get_children()[0])
+        win._forget_selected()
+        pump(root)
+
+        assert len(win._tree.get_children()) == 1
+        # Приложение обязано узнать сразу: иначе выброшенное правило
+        # доживёт до перезапуска.
+        assert called == [True]
+
+    def test_forget_all_empties_the_list(self, root, lex):
+        called = []
+        win = self.window(root, lex, on_change=lambda: called.append(True))
+        win._forget_all()
+        pump(root)
+
+        assert win._tree.get_children() == ()
+        assert lex.lessons == []
+        assert called == [True]
+
+    def test_forgetting_nothing_selected_is_harmless(self, root, lex):
+        win = self.window(root, lex)
+        win._forget_selected()
+        pump(root)
+        assert len(win._tree.get_children()) == 2
+
+    def test_reopening_shows_fresh_data(self, root, lex):
+        win = self.window(root, lex)
+        lex.learn("открыл фигму", "открыл Figma")
+        win.open()
+        pump(root)
+        assert len(win._tree.get_children()) == 3
+
+    def test_empty_lexicon_opens_without_rows(self, root, tmp_path):
+        from whisperfree.config import LexiconConfig
+        from whisperfree.lexicon import Lexicon
+
+        empty = Lexicon(tmp_path / "empty.json", LexiconConfig())
+        win = self.window(root, empty)
+        assert win._tree.get_children() == ()

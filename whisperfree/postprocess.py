@@ -154,7 +154,28 @@ class Postprocessor:
 
     def __init__(self, cfg) -> None:
         self.cfg = cfg
-        self._compiled = compile_replacements(cfg.replacements) if cfg.enabled else []
+        self._learned: dict[str, str] = {}
+        self._compiled: list[tuple[re.Pattern[str], str]] = []
+        self._rebuild()
+
+    def set_learned(self, mapping: dict[str, str]) -> None:
+        """Задаёт выученные замены поверх заданных в конфиге.
+
+        Вызывается на старте и после каждого нового урока: выученное должно
+        работать сразу, а не с перезапуска.
+        """
+        self._learned = dict(mapping)
+        self._rebuild()
+
+    def _rebuild(self) -> None:
+        if not self.cfg.enabled:
+            self._compiled = []
+            return
+        # Порядок слияния — не деталь: ключ, заданный человеком руками,
+        # выученный перебивать не должен. Программа, спорящая с настройкой
+        # своего хозяина, — это не обучение, а самоволие.
+        merged = {**self._learned, **self.cfg.replacements}
+        self._compiled = compile_replacements(merged)
 
     def clean(self, text: str) -> str:
         """Первый этап: нормализация и отсев галлюцинаций.

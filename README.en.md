@@ -33,6 +33,7 @@ terms mixed in — that is what the replacement dictionary is for, see
 - Push-to-talk on Right Ctrl — text lands where the caret was, in any Windows window.
 - Transcription through Groq, model `whisper-large-v3-turbo`: 204–336 ms per request — measured on live dictations, 9.2 seconds of speech on average, August 2026.
 - An editor model pass with `openai/gpt-oss-120b`: punctuation, grammar, agreement, 293–702 ms.
+- It learns from your corrections: fix the pasted text, select it, press Ctrl+Alt+U — the program remembers, and tells you which stage got it wrong, the microphone or the editor model.
 - A regex-backed term dictionary — every inflected form of a word maps to one canonical spelling, edited in a single file.
 - 250 ms pre-roll: recording starts before the key goes down, so the first syllable is not clipped.
 - The API key is read only from `.env` or an environment variable, and never written into `config.toml`.
@@ -53,8 +54,12 @@ and I am not going to quote any.
 
 The dictionary part is easier to show. Wispr Flow has a Dictionary, and you fill
 it in by hand, word by word, or your terms get mangled: `Gemini` comes out as
-"Джемини", `Docker` as "Докер". In WhisperFree the replacement dictionary lives
-in `config.toml` and understands regular expressions: one line
+"Джемини", `Docker` as "Докер". In WhisperFree the dictionary fills itself: fix
+the pasted text, select it, press Ctrl+Alt+U, and the program compares it with
+what it produced and remembers the difference. It also tells you which stage got
+it wrong — the microphone or the editor model. The hand-written dictionary is
+still there and lives in `config.toml`, where it understands regular
+expressions: one line
 `re:\bдокер\w*` = `"Docker"` covers every case ending and hyphenation at once.
 The keys are plain regex, so the same trick works for whatever language you
 dictate in. On top of that runs an editor-model pass — and the dictionary is
@@ -75,7 +80,7 @@ shows both what the headers carry and your own measured spend per dictation.
 | | WhisperFree | Wispr Flow |
 |---|---|---|
 | Price | the provider's free tier; on the paid tier $0.000201 per dictation | $15 a month |
-| Term dictionary | `config.toml`, regex covering every inflected form, editor model on top | Dictionary, filled in by hand one word at a time |
+| Term dictionary | fills itself from your corrections, plus `config.toml` with regex covering every inflected form | Dictionary, filled in by hand one word at a time |
 | Where the key lives | your `.env` or an environment variable, never written to the config | no key of your own, requests go through the service |
 | Open source | yes, MIT | no |
 
@@ -90,6 +95,7 @@ shows both what the headers carry and your own measured spend per dictation.
 - [Keys](#keys)
 - [When the paste does not land](#when-the-paste-does-not-land)
 - [Mixed-language dictation](#mixed-language-dictation)
+- [It learns from your corrections](#it-learns-from-your-corrections)
 - [Model-based text refinement](#model-based-text-refinement)
 - [What it costs](#what-it-costs)
 - [A different provider](#a-different-provider)
@@ -216,6 +222,7 @@ see with your own eyes.
 | **Right Ctrl** (hold) | Record and paste |
 | **Ctrl+Alt+V** | Paste the last transcript again |
 | **Ctrl+Alt+H** | Open the history window |
+| **Ctrl+Alt+U** | Learn a correction: select the fixed text and press |
 
 Right Ctrl was picked because almost nobody uses it, and `Ctrl+Win` is already
 taken by Wispr Flow. Change it in `[hotkeys]`.
@@ -314,6 +321,83 @@ dictate_alt = "scroll_lock"
 
 `scroll_lock`, `pause` or `f13`..`f24` are the good candidates: nothing else
 claims them.
+
+---
+
+## It learns from your corrections
+
+This is the case the whole thing was written for. You dictated, the program
+pasted, and you fixed a couple of words by hand. Select the corrected text and
+press **Ctrl+Alt+U**. The program finds that dictation in the history, diffs it
+against its own output and remembers the difference.
+
+A fragment works too — one sentence out of a paragraph. The matching record is
+found by similarity rather than by time: while you were editing, you could have
+switched windows and dictated something else.
+
+The selection is read the only way Windows allows: the program sends the copy
+combo to the window and looks at the clipboard, then puts the previous contents
+back. In terminals it sends Ctrl+Shift+C rather than Ctrl+C — in a terminal
+Ctrl+C interrupts the running program instead of copying. The list of such apps
+comes from `[inject].paste_overrides`, so no second table was needed.
+
+**Where the learning is applied.** In three places, of different strength:
+
+| Channel | What it does | When |
+|---|---|---|
+| Recogniser hint | the term goes into the prompt, so Whisper hears it right **up front** | from the first correction |
+| Editor-model note | a list of spellings it has already mangled | from the first correction |
+| Text replacement | a deterministic fix of the finished text | from the second correction, and only where the rule holds everywhere |
+
+**Why a replacement is not created at once, or from everything.** A replacement
+applies to **all** future text. If an ordinary rewording were taken for a
+recognition error — you changed "today" to "tomorrow" — then "today" would never
+be written again, and noticing that would not be easy. So the decision is not
+made by eye.
+
+Character similarity cannot tell the two apart, and the measurements show it:
+"клод код" → `Claude Code` (a real correction) scores 0.32, while "сделаю" →
+"сделаем" (a rewording) scores 0.77 — the wrong way round, and no threshold
+separates them. What works is comparing **sound**: a recognition error by
+definition produces a word that sounds like the right one, otherwise the
+microphone would not have confused them. The program reduces both spellings to a
+consonant skeleton shared across alphabets: "докер" and `Docker` both give
+`dkr`, "клод код" and `Claude Code` give `kldkd`. Across 56 real terms the
+skeletons matched for 53; across 30 word translations ("встреча" → `meeting`)
+only two coincidental pairs matched.
+
+Hence the rules:
+
+- **Script changed and the sound matches** — replacement. "докер" is not a
+  Russian word, so replacing it with `Docker` is right in any sentence.
+- **A capital inside the word** ("Github" → `GitHub`) — replacement: that
+  capital belongs to the term itself. A capital only at the start is the letter
+  after a full stop, and it never becomes a rule, or the word would start
+  getting capitalised mid-sentence too.
+- **Same script on both sides** — hint only, no matter how often you correct it.
+  Within one script a typo cannot be told from a different word: they sound
+  alike, which is exactly why they get confused. Both "был" and "были" are real
+  words, and replacing one with the other globally would break the text. Russian
+  ё and е count as different letters here: "все" → "всё" was the single most
+  common correction in my own history (39 times across 641 dictations), and as a
+  replacement it would turn "everyone arrived" into "everything arrived".
+- **A whole phrase rewritten**, or more than five replacements at once — nothing
+  is learned: that is a new text, not a correction.
+
+**Visible and reversible.** The plate reports what was learned immediately.
+The tray item opens the list: what was heard, what it should be, which stage got
+it wrong, and how the correction is applied. There is a hotkey for that list too,
+off by default — combos are not suppressed, so they reach both the program and
+the window under the cursor, and the obvious `ctrl+alt+l` is taken by "reformat
+code" in JetBrains IDEs. Enable it via `[hotkeys].open_lexicon`. Any row can be
+forgotten with Delete, and it stops working that instant rather than after a
+restart. `lexicon.bat` prints the same list plus a summary of where your errors
+come from. Everything learned lives in a single file
+`%APPDATA%\WhisperFree\lexicon.json`, kept apart from `config.toml` so machine
+entries never mix with your comments.
+
+Learning can be switched off entirely with `[lexicon].enabled = false`, or
+limited to hints only with `[lexicon].rules = false`.
 
 ---
 
@@ -467,6 +551,9 @@ opened from the tray.
 | `[inject].method` | `unicode` instead of `clipboard`, if the clipboard must not be touched. Slower |
 | `[history].keep_audio` | Keep the audio of recent dictations, to re-transcribe without saying it again |
 | `[hotkeys].suppress` | Hide the dictation key from applications. Only works for dedicated keys |
+| `[lexicon].enabled` | Learn from your corrections via Ctrl+Alt+U |
+| `[lexicon].rules` | Turn learning into replacements. `false` keeps recogniser hints only |
+| `[lexicon].min_hits_for_rule` | How many times the same fix is needed before a replacement appears |
 
 ---
 
@@ -485,6 +572,7 @@ exception is `sound.bat`, which needs no Python at all.
 | `calibrate.bat` | Measures the noise floor over three seconds of silence and writes the chosen `[audio].silence_peak` into the config itself |
 | `paste-test.bat` | Gives you five seconds to switch windows, pastes a test phrase there and prints which key it used |
 | `limits.bat` | Remaining plan limits, read out of the API response headers |
+| `lexicon.bat` | What the program learned from your corrections, and where the errors come from |
 | `sound.bat` | Opens the classic Sound panel on the Recording tab: the microphone level slider and Microphone Boost live there, not in modern Settings |
 | `diag.bat` | Prints the size, mtime and SHA-256 of the `config.toml` this particular process actually opened |
 | `build.bat` | Builds the standalone `dist\WhisperFree` folder |
@@ -598,6 +686,8 @@ whisperfree/
   inject.py          clipboard and SendInput, paste key chosen per program
   providers/         adapter for an OpenAI-compatible endpoint
   postprocess.py     replacement dictionary, hallucination filtering on silence
+  lexicon.py         learning from corrections: sound-based comparison,
+                     what may and may not be remembered
   history.py         transcript log and re-pasting
   overlay.py         status bar on top of every window
   tray.py            icon, menu, spend counter

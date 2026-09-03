@@ -65,6 +65,8 @@ class Tray:
         themes: dict | None = None,
         current_theme: Callable[[], str] | None = None,
         on_theme: Callable[[str], None] | None = None,
+        on_open_lexicon: Callable[[], None] | None = None,
+        lexicon_count: Callable[[], int] | None = None,
     ) -> None:
         self.history = history
         self.provider_cfg = provider_cfg
@@ -79,6 +81,8 @@ class Tray:
         self.themes = themes or {}
         self.current_theme = current_theme or (lambda: "")
         self.on_theme = on_theme
+        self.on_open_lexicon = on_open_lexicon
+        self.lexicon_count = lexicon_count or (lambda: 0)
         self._icon: pystray.Icon | None = None
         self._thread: threading.Thread | None = None
 
@@ -157,6 +161,16 @@ class Tray:
     def _theme_checked(self, theme_id: str) -> Callable[..., bool]:
         return lambda _item: self.current_theme() == theme_id
 
+    def _open_lexicon(self) -> None:
+        if self.on_open_lexicon is not None:
+            self.on_open_lexicon()
+
+    def _lexicon_label(self) -> str:
+        """Число в подписи — единственное место, где видно, что программа
+        вообще чему-то учится, не открывая окна."""
+        count = self.lexicon_count()
+        return f"Выученные правки ({count})…" if count else "Выученные правки…"
+
     def _build_menu(self) -> pystray.Menu:
         return pystray.Menu(
             pystray.MenuItem(
@@ -167,6 +181,11 @@ class Tray:
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Последние расшифровки", pystray.Menu(*self._history_items())),
             pystray.MenuItem("Окно истории…", lambda _icon, _item: self.on_open_history()),
+            pystray.MenuItem(
+                lambda _item: self._lexicon_label(),
+                lambda _icon, _item: self._open_lexicon(),
+                enabled=self.on_open_lexicon is not None,
+            ),
             pystray.MenuItem("Вид плашки", pystray.Menu(*self._theme_items())),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem(lambda _item: self._usage_text(), None, enabled=False),
