@@ -35,6 +35,7 @@ from .providers import TranscriptionError, TranscriptionRequest, build_provider
 from .limits import report as report_limits
 from .refine import Refiner
 from .singleton import SingleInstance
+from .theme import load_themes, pick
 from .tray import Tray
 
 log = logging.getLogger(__name__)
@@ -120,7 +121,17 @@ class App:
         # одном процессе, и тестам нужен общий.
         self.root = root or tk.Tk()
         self.root.withdraw()
-        self.overlay = Overlay(self.root, enabled=cfg.ui.overlay)
+        self.themes = load_themes()
+        position = None
+        if cfg.ui.overlay_x >= 0 and cfg.ui.overlay_y >= 0:
+            position = (cfg.ui.overlay_x, cfg.ui.overlay_y)
+        self.overlay = Overlay(
+            self.root,
+            enabled=cfg.ui.overlay,
+            theme=pick(self.themes, cfg.ui.theme),
+            position=position,
+            on_move=self._remember_plate_position,
+        )
         self.history_window = HistoryWindow(
             self.root, self.history, self._paste_record, self._copy_record
         )
@@ -176,6 +187,9 @@ class App:
                 on_quit=self.quit,
                 config_path=config_mod.config_path(),
                 log_path=config_mod.log_path(),
+                themes=self.themes,
+                current_theme=lambda: self.overlay.theme.id,
+                on_theme=self._switch_theme,
             )
             self.tray.start()
 
@@ -720,6 +734,44 @@ class App:
         """
         log.error(message, *args)
         self._try_reopen()
+
+    def _switch_theme(self, theme_id: str) -> None:
+        """Сменить оформление плашки. Зовётся из потока меню в трее."""
+        theme = self.themes.get(theme_id)
+        if theme is None:
+            log.warning("темы «%s» нет", theme_id)
+            return
+        self.overlay.set_theme(theme)
+        self._remember_ui(theme=theme_id)
+
+    def _remember_plate_position(self, x: int, y: int) -> None:
+        """Запомнить, куда человек перетащил плашку."""
+        self._remember_ui(overlay_x=int(x), overlay_y=int(y))
+
+    def _remember_ui(self, **values) -> None:
+        """Дописать значения в раздел [ui] конфига.
+
+        Пишем в файл, а не держим в памяти: перетаскивать плашку заново после
+        каждого запуска — издевательство. Правка точечная, tomlkit сохраняет
+        комментарии и порядок строк, так что руками правленный конфиг не
+        превращается в машинный.
+        """
+        for key, value in values.items():
+            setattr(self.cfg.ui, key, value)
+
+        path = config_mod.config_path()
+        try:
+            import tomlkit
+
+            document = tomlkit.parse(path.read_text(encoding="utf-8"))
+            section = document.setdefault("ui", tomlkit.table())
+            for key, value in values.items():
+                section[key] = value
+            path.write_text(tomlkit.dumps(document), encoding="utf-8")
+        except Exception as exc:
+            # Не сохранилось — не повод ронять программу: в этом сеансе
+            # выбор всё равно уже применён.
+            log.warning("не удалось записать %s в конфиг: %s", values, exc)
 
     def _try_reopen(self) -> None:
         # Поколение берётся в начале операции, как и у всех остальных:

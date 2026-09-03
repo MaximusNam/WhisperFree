@@ -1,0 +1,103 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "name": "WhisperFree Backup & Alternative Themes",
+  "version": "1.0.0",
+  "description": "Запасные и альтернативные варианты дизайна оверлея голосового ввода (компактный форм-фактор 185x36 px).",
+  "geometry": {
+    "width_px": 185,
+    "height_px": 36,
+    "corner_radius_px": 18,
+    "shape": "capsule_oval",
+    "padding_left_px": 14,
+    "padding_right_px": 14,
+    "border_width_px": 1.5,
+    "indicator_dot_diameter_px": 8,
+    "level_bar_height_px": 2.5
+  },
+  "backup_themes": {
+    "graphite_slate": {
+      "id": "graphite_slate",
+      "name_ru": "Вариант 1: Холодный Сланец (Slate)",
+      "description": "Строгий холодный серый кант, нейтральная графитовая точка, классический сланец.",
+      "surface": {
+        "background_rgba": "rgba(30, 41, 59, 0.13)",
+        "border_rgba": "rgba(71, 85, 105, 0.75)",
+        "text_hex": "#0F172A",
+        "dot_hex": "#64748B",
+        "bar_hex": "#64748B"
+      }
+    },
+    "graphite_coral_accent": {
+      "id": "graphite_coral_accent",
+      "name_ru": "Вариант 3: Графит + Коралловая точка",
+      "description": "Дымчато-графитовый корпус с деликатной ало-коралловой точкой записи.",
+      "surface": {
+        "background_rgba": "rgba(30, 41, 59, 0.12)",
+        "border_rgba": "rgba(71, 85, 105, 0.75)",
+        "text_hex": "#0F172A",
+        "dot_hex": "#EF4444",
+        "bar_hex": "#EF4444"
+      }
+    },
+    "graphite_titanium": {
+      "id": "graphite_titanium",
+      "name_ru": "Вариант 4: Титановый Графит (светлая грань)",
+      "description": "Дымчатый графит со светлым сатиновым кантом (эффект полированного титана).",
+      "surface": {
+        "background_rgba": "rgba(24, 32, 45, 0.14)",
+        "border_rgba": "rgba(255, 255, 255, 0.95)",
+        "text_hex": "#0F172A",
+        "dot_hex": "#475569",
+        "bar_hex": "#475569"
+      }
+    },
+    "graphite_warm_amber": {
+      "id": "graphite_warm_amber",
+      "name_ru": "Вариант 5: Тёплый Графит + Янтарь",
+      "description": "Теплый кофейный графит с золотисто-янтарной полоской и точкой записи.",
+      "surface": {
+        "background_rgba": "rgba(42, 36, 32, 0.13)",
+        "border_rgba": "rgba(95, 83, 78, 0.75)",
+        "text_hex": "#1C1917",
+        "dot_hex": "#D97706",
+        "bar_hex": "#D97706"
+      }
+    },
+    "graphite_minimal_1px": {
+      "id": "graphite_minimal_1px",
+      "name_ru": "Вариант 6: Студийный Минимал 1px",
+      "description": "Тончайший 1px кант, минимальное 9% затемнение, чистый аскетичный антрацит.",
+      "surface": {
+        "background_rgba": "rgba(15, 23, 42, 0.09)",
+        "border_rgba": "rgba(100, 116, 139, 0.50)",
+        "text_hex": "#0F172A",
+        "dot_hex": "#334155",
+        "bar_hex": "#334155"
+      }
+    },
+    "aquamarine_cyan": {
+      "id": "aquamarine_cyan",
+      "name_ru": "Альтернатива: Аквамарин / Циан",
+      "description": "Бирюзовый контур, легкий аквамариновый оттенок 12%, отличная читаемость на белом.",
+      "surface": {
+        "background_rgba": "rgba(6, 182, 212, 0.12)",
+        "border_rgba": "rgba(6, 182, 212, 0.75)",
+        "text_hex": "#0E7490",
+        "dot_hex": "#06B6D4",
+        "bar_hex": "#06B6D4"
+      }
+    },
+    "crystal_clear": {
+      "id": "crystal_clear",
+      "name_ru": "Альтернатива: Кристальная Линза",
+      "description": "100% прозрачное оптическое стекло без цвета со стальной рамкой и красной точкой.",
+      "surface": {
+        "background_rgba": "rgba(15, 23, 42, 0.10)",
+        "border_rgba": "rgba(100, 116, 139, 0.55)",
+        "text_hex": "#0F172A",
+        "dot_hex": "#EF4444",
+        "bar_hex": "#EF4444"
+      }
+    }
+  }
+}

@@ -1,0 +1,110 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "name": "WhisperFree Primary Theme",
+  "theme_id": "warm_smoky_mocha",
+  "theme_name_ru": "Тёплый Дымчатый Мокко (Warm Smoky Mocha / Taupe)",
+  "version": "1.0.0",
+  "description": "Основной утвержденный дизайн-макет: овальная капсула (185x36), легкое кофейно-графитовое тонирование (13%), 100% сквозное чтение текста, нижняя полоска звука.",
+  "target_environment": {
+    "background": "light_and_white_windows",
+    "supported_apps": ["CRM", "Word", "Excel", "Browser Forms", "Google Docs"]
+  },
+  "geometry": {
+    "width_px": 185,
+    "height_px": 36,
+    "corner_radius_px": 18,
+    "shape": "capsule_oval",
+    "padding_left_px": 14,
+    "padding_right_px": 14,
+    "padding_top_px": 6,
+    "padding_bottom_px": 6,
+    "border_width_px": 1.5,
+    "indicator_dot_diameter_px": 8,
+    "level_bar_height_px": 2.5,
+    "level_bar_margin_horizontal_px": 14
+  },
+  "surface": {
+    "background_color_hex": "#302824",
+    "background_color_rgba": "rgba(48, 40, 36, 0.13)",
+    "alpha": 0.13,
+    "backdrop_blur_px": 0,
+    "border_color_hex": "#5F534E",
+    "border_color_rgba": "rgba(95, 83, 78, 0.75)",
+    "inner_specular_edge_rgba": "rgba(255, 255, 255, 0.45)",
+    "drop_shadow": {
+      "color_rgba": "rgba(28, 25, 23, 0.12)",
+      "offset_x_px": 0,
+      "offset_y_px": 6,
+      "blur_radius_px": 16
+    }
+  },
+  "typography": {
+    "font_family_primary": "Segoe UI Variable Text",
+    "font_family_fallbacks": ["Segoe UI", "Inter", "Arial", "sans-serif"],
+    "font_size_pt": 10,
+    "font_size_px": 13,
+    "font_weight": "SemiBold",
+    "font_weight_numeric": 600,
+    "letter_spacing_em": 0.01,
+    "text_color_hex": "#1C1917",
+    "text_color_rgba": "rgba(28, 25, 23, 0.95)",
+    "text_alignment": "left"
+  },
+  "audio_level_bar": {
+    "position": "bottom",
+    "height_px": 2.5,
+    "corner_radius_px": 1.5,
+    "track_color_rgba": "rgba(0, 0, 0, 0.08)",
+    "reactive": true
+  },
+  "states": {
+    "recording": {
+      "state_id": "recording",
+      "display_text": "Запись…",
+      "dot_color_hex": "#78716C",
+      "dot_glow_rgba": "rgba(120, 113, 108, 0.35)",
+      "bar_color_hex": "#78716C",
+      "text_color_hex": "#1C1917"
+    },
+    "silent": {
+      "state_id": "silent",
+      "display_text": "Микрофон молчит",
+      "dot_color_hex": "#A8A29E",
+      "dot_glow_rgba": "rgba(168, 162, 158, 0.25)",
+      "bar_color_hex": "#A8A29E",
+      "text_color_hex": "#44403C"
+    },
+    "sending": {
+      "state_id": "sending",
+      "display_text": "Распознаю…",
+      "dot_color_hex": "#D97706",
+      "dot_glow_rgba": "rgba(217, 119, 6, 0.40)",
+      "bar_color_hex": "#D97706",
+      "text_color_hex": "#1C1917"
+    },
+    "refining": {
+      "state_id": "refining",
+      "display_text": "Правлю текст…",
+      "dot_color_hex": "#57534E",
+      "dot_glow_rgba": "rgba(87, 83, 78, 0.35)",
+      "bar_color_hex": "#57534E",
+      "text_color_hex": "#1C1917"
+    },
+    "ok": {
+      "state_id": "ok",
+      "display_text": "Готово",
+      "dot_color_hex": "#16A34A",
+      "dot_glow_rgba": "rgba(22, 163, 74, 0.40)",
+      "bar_color_hex": "#16A34A",
+      "text_color_hex": "#14532D"
+    },
+    "error": {
+      "state_id": "error",
+      "display_text": "Ошибка",
+      "dot_color_hex": "#DC2626",
+      "dot_glow_rgba": "rgba(220, 38, 38, 0.45)",
+      "bar_color_hex": "#DC2626",
+      "text_color_hex": "#7F1D1D"
+    }
+  }
+}

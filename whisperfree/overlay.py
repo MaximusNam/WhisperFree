@@ -4,6 +4,11 @@
 что-то пошло не так. Молчаливая потеря продиктованного абзаца хуже любой
 ошибки на экране, поэтому провал вставки виден всегда.
 
+Плашка рисуется не виджетами Tk, а картинкой в слоёном окне Windows (см.
+plate.py): в макете фон прозрачен на 87%, а текст поверх него непрозрачен,
+и Tk такого не умеет — у него прозрачность либо на всё окно сразу, либо
+по одному выбранному цвету.
+
 Окно живёт всё время работы приложения и прячется уводом за край экрана:
 withdraw/deiconify на Windows умеет перехватывать фокус, а забирать фокус у
 того окна, куда мы собираемся вставлять текст, категорически нельзя.
@@ -28,54 +33,31 @@ from __future__ import annotations
 import logging
 import queue
 import threading
+import time
 import tkinter as tk
+
+from . import plate
+from .theme import Theme, load_themes, pick
 
 log = logging.getLogger(__name__)
 
-_WIDTH = 260
-_HEIGHT = 44
+# Куда уезжает спрятанная плашка. Не withdraw и не прозрачная картинка:
+# уводом за край окно точно не мигнёт и точно не отберёт фокус.
 _HIDDEN_Y = -400
 
-# Фон плашки. Вынесен в константу не для красоты: относительно него считается
-# контраст каждого цвета состояния, и тест проверяет ровно этот фон.
-_BG = "#1c1c1f"
-
-# Полоска уровня во всю ширину плашки по нижнему краю: заметно краем глаза,
-# но не тянет взгляд с текста, куда человек диктует.
-_BAR_HEIGHT = 4
-_BAR_BG = "#2a2a2f"
-
-# Цвет — единственное, что читается боковым зрением; подпись человек в этот
-# момент не читает, он смотрит туда, куда диктует. Поэтому у каждого состояния
-# свой цвет, и близких пар быть не должно: «Запись…» и «Ошибка» сначала были
-# одинаково красными и различались только буквами, потом розовым против
-# красного — а это по ΔE2000 всего 22.9, краем глаза по-прежнему одно и то же.
-#
-# Палитра подобрана перебором, а не на вкус: максимум минимальной попарной
-# ΔE2000 при закреплённых смыслах (ошибка красная, «Готово» зелёное, «микрофон
-# молчит» синий — на эти три ссылаются комментарии здесь и в __main__.py) и
-# контрасте к фону плашки не ниже 4.5:1. Самая похожая пара разнесена на 39.0
-# (было 19.4), «Запись…» и «Ошибка» — на 39.2, а для дихроматов минимум
-# поднялся с 7.1 до 12.0. Все эти числа считает и стережёт tests/test_ui.py:
-# поправить цвет «чтобы красивее» без прогона тестов теперь не выйдет.
-_STYLES = {
-    # Розово-пурпурный, а не красный: красный оставлен ошибке (и подсказке про
-    # мёртвый микрофон, которая тоже красная), а спутать «идёт запись» с «всё
-    # сломалось» нельзя.
-    "recording": ("#f500cc", "Запись…"),
-    # Синий не совпадает ни с записью, ни с ошибкой: смена цвета сама по себе
-    # видна боковым зрением, читать подпись для этого не требуется.
-    "silent": ("#1184ff", "Микрофон молчит"),
-    "sending": ("#ffc000", "Распознаю…"),
-    # Голубой, а не фиолетовый, как было: фиолетовый лежал между «записью» и
-    # «микрофон молчит» и тянул минимум пары вниз.
-    "refining": ("#45f4ff", "Правлю текст…"),
-    "ok": ("#449640", "Готово"),
-    "error": ("#ff360f", "Ошибка"),
-}
+# Отступ от нижнего края экрана при первом запуске, пока человек не перетащил
+# плашку сам.
+_BOTTOM_MARGIN = 90
 
 # Состояния, при которых запись идёт и полоска уровня имеет смысл.
 _LIVE_STATES = ("recording", "silent")
+
+# Период расходящейся волны у точки, как в макете: ripple 1.6s.
+_PULSE_S = 1.6
+
+# Насколько часто разбирается очередь. Совпадает с шагом опроса уровня в
+# __main__ (80 мс) с запасом: перерисовка плашки стоит около миллисекунды.
+_PUMP_MS = 40
 
 
 def _clamp01(value) -> float:
@@ -96,26 +78,44 @@ def _clamp01(value) -> float:
 class Overlay:
     """Плашка состояния. Все публичные методы можно звать из любого потока."""
 
-    def __init__(self, root: tk.Tk, enabled: bool = True) -> None:
+    def __init__(
+        self,
+        root: tk.Tk,
+        enabled: bool = True,
+        theme: Theme | None = None,
+        position: tuple[int, int] | None = None,
+        on_move=None,
+    ) -> None:
         self.root = root
         self.enabled = enabled
+        self.theme = theme or pick(load_themes(), None)
+        # Кому сообщать о новом месте плашки. Нужен, чтобы приложение
+        # запомнило его в конфиге: перетаскивать заново после каждого
+        # запуска — издевательство.
+        self.on_move = on_move
+
         self._queue: queue.Queue[tuple] = queue.Queue()
         self._window: tk.Toplevel | None = None
-        self._dot: tk.Canvas | None = None
-        self._label: tk.Label | None = None
-        self._bar: tk.Canvas | None = None
-        self._bar_item: int | None = None
+        self._hwnd: int | None = None
+        self._layered = False
         self._hide_job: str | None = None
+
+        self._state: str | None = None
+        self._text = ""
         self._level = 0.0
-        self._color = _STYLES["recording"][0]
-        # Поколение показа: растёт на begin_session(), сравнивается в _stale().
-        # Лок, а не голый +=, потому что номер берут из потока хука, а сверяют
-        # из рабочего.
+        self._visible = False
+        self._scale = 1.0
+
+        self._x, self._y = 0, 0
+        self._wanted = position
+        self._drag_from: tuple[int, int] | None = None
+
         self._session = 0
         self._session_lock = threading.Lock()
+
         if enabled:
             self._build()
-        self.root.after(40, self._pump)
+        self.root.after(_PUMP_MS, self._pump)
 
     # --- построение ------------------------------------------------------------
 
@@ -123,60 +123,116 @@ class Overlay:
         win = tk.Toplevel(self.root)
         win.overrideredirect(True)
         win.attributes("-topmost", True)
+
+        # Масштаб экрана: при 125% плашка обязана вырасти вместе со всем
+        # остальным, иначе на ноутбуке она превращается в марку.
         try:
-            win.attributes("-alpha", 0.94)
-            win.attributes("-toolwindow", True)
-            # Окно не принимает ввод и потому не может украсть фокус.
-            win.attributes("-disabled", True)
-        except tk.TclError:  # pragma: no cover - зависит от версии Tk
-            pass
+            self._scale = max(1.0, self.root.winfo_fpixels("1i") / 96.0)
+        except tk.TclError:  # pragma: no cover - зависит от Tk
+            self._scale = 1.0
 
-        frame = tk.Frame(win, bg=_BG, padx=12, pady=8)
-
-        # Полоску пакуем ПЕРВОЙ: у растянутого frame она иначе отберёт место
-        # снизу и уедет за границу окна.
-        self._bar = tk.Canvas(
-            win, width=_WIDTH, height=_BAR_HEIGHT, bg=_BAR_BG, highlightthickness=0
-        )
-        # Прямоугольник создаём один раз и потом только двигаем правый край:
-        # уровень приходит каждые 80 мс, пересоздавать объекты Tk накладно.
-        self._bar_item = self._bar.create_rectangle(
-            0, 0, 0, _BAR_HEIGHT, fill=self._color, outline=""
-        )
-        self._bar.pack(side="bottom", fill="x")
-
-        frame.pack(fill="both", expand=True)
-
-        self._dot = tk.Canvas(
-            frame, width=12, height=12, bg=_BG, highlightthickness=0
-        )
-        self._dot.create_oval(2, 2, 11, 11, fill=self._color, outline="")
-        self._dot.pack(side="left", padx=(0, 10))
-
-        self._label = tk.Label(
-            frame,
-            text="",
-            bg=_BG,
-            fg="#f2f2f3",
-            font=("Segoe UI", 10),
-            anchor="w",
-            justify="left",
-        )
-        self._label.pack(side="left", fill="x", expand=True)
+        width, height = self.size
+        self._x, self._y = self._default_position()
+        if self._wanted:
+            self._x, self._y = self._clamp_to_screen(*self._wanted)
+        win.geometry(f"{width}x{height}+{self._x}+{_HIDDEN_Y}")
+        win.update_idletasks()
 
         self._window = win
-        self._place(visible=False)
+        try:
+            # Не winfo_id() напрямую: Tk отдаёт внутреннее окно, а слоёностью
+            # управляет его родитель — см. plate.top_level().
+            self._hwnd = plate.top_level(win.winfo_id())
+            self._layered = plate.make_layered(self._hwnd)
+        except Exception as exc:  # pragma: no cover - зависит от системы
+            log.error("плашка не смогла стать слоёной (%s), рисовать нечем", exc)
+            self._layered = False
 
-    def _place(self, visible: bool) -> None:
-        if self._window is None:
+        # Перетаскивание. Окно объявлено не активируемым (WS_EX_NOACTIVATE),
+        # поэтому щелчок по нему не уводит фокус из документа, куда мы потом
+        # вставляем текст.
+        win.bind("<Button-1>", self._grab)
+        win.bind("<B1-Motion>", self._drag)
+        win.bind("<ButtonRelease-1>", self._drop)
+
+    @property
+    def size(self) -> tuple[int, int]:
+        """Размер самой капсулы. По нему человек её и таскает."""
+        geo = self.theme.geometry
+        return (
+            max(1, int(round(geo.width * self._scale))),
+            max(1, int(round(geo.height * self._scale))),
+        )
+
+    @property
+    def _pad(self) -> int:
+        """Поле вокруг капсулы под тень.
+
+        Окно больше плашки: иначе тень обрезалась бы по его краю и
+        превращалась в тёмную полосу.
+        """
+        return plate.shadow_padding(self.theme, self._scale)
+
+    def _phase(self) -> float:
+        """Фаза волны у точки: растёт со временем, только пока идёт запись."""
+        if self._state != "recording":
+            return 0.0
+        return (time.monotonic() % _PULSE_S) / _PULSE_S
+
+    def _default_position(self) -> tuple[int, int]:
+        width, height = self.size
+        try:
+            screen_w = self.root.winfo_screenwidth()
+            screen_h = self.root.winfo_screenheight()
+        except tk.TclError:  # pragma: no cover
+            return (0, 0)
+        return ((screen_w - width) // 2, screen_h - height - _BOTTOM_MARGIN)
+
+    def _clamp_to_screen(self, x: int, y: int) -> tuple[int, int]:
+        """Не даёт плашке уехать за край.
+
+        Экран могли отключить или сменить разрешение, а запомненное место
+        осталось от прошлой раскладки: плашка нашлась бы за границей и
+        выглядела бы как «перестала показываться».
+        """
+        width, height = self.size
+        try:
+            screen_w = self.root.winfo_screenwidth()
+            screen_h = self.root.winfo_screenheight()
+        except tk.TclError:  # pragma: no cover
+            return (x, y)
+        x = max(0, min(int(x), max(0, screen_w - width)))
+        y = max(0, min(int(y), max(0, screen_h - height)))
+        return (x, y)
+
+    # --- перетаскивание --------------------------------------------------------
+
+    def _grab(self, event) -> None:
+        self._drag_from = (event.x_root - self._x, event.y_root - self._y)
+
+    def _drag(self, event) -> None:
+        if self._drag_from is None:
             return
-        screen_w = self.root.winfo_screenwidth()
-        screen_h = self.root.winfo_screenheight()
-        x = (screen_w - _WIDTH) // 2
-        y = screen_h - _HEIGHT - 90 if visible else _HIDDEN_Y
-        self._window.geometry(f"{_WIDTH}x{_HEIGHT}+{x}+{y}")
+        dx, dy = self._drag_from
+        self._x, self._y = self._clamp_to_screen(event.x_root - dx, event.y_root - dy)
+        self._show()
+
+    def _drop(self, event) -> None:
+        if self._drag_from is None:
+            return
+        self._drag_from = None
+        log.info("плашка перенесена в (%d, %d)", self._x, self._y)
+        if self.on_move is not None:
+            try:
+                self.on_move(self._x, self._y)
+            except Exception:  # pragma: no cover - сохранение не должно ронять UI
+                log.exception("не удалось запомнить положение плашки")
 
     # --- публичный API ---------------------------------------------------------
+
+    def set_theme(self, theme: Theme) -> None:
+        """Сменить оформление. Можно из любого потока."""
+        self._queue.put(("theme", theme, None, None, None))
 
     def begin_session(self) -> int:
         """Открыть новый показ и вернуть его номер.
@@ -207,7 +263,7 @@ class Overlay:
         Единственный вызывающий — опрос записи в потоке Tk с шагом 80 мс
         (LEVEL_TICK_MS в __main__), он же и читает значение у рекордера;
         сам колбэк PortAudio сюда не ходит. Очередь всё равно нужна: метод
-        обещан любому потоку, а виджеты трогает только _pump.
+        обещан любому потоку, а рисует только _pump.
         """
         if not self.enabled:
             return
@@ -291,12 +347,14 @@ class Overlay:
     # --- насос очереди ---------------------------------------------------------
 
     def _pump(self) -> None:
-        """Единственное место, где трогаются виджеты — поток Tk."""
+        """Единственное место, где рисуется плашка — поток Tk."""
         try:
             while True:
                 kind, first, message, auto_hide_ms, session = self._queue.get_nowait()
                 if kind == "level":
                     self._apply_level(first)
+                elif kind == "theme":
+                    self._apply_theme(first)
                 # Поколение сверяется и здесь, а не только у отправителя: между
                 # его проверкой и этой строкой человек успевает начать новую
                 # диктовку. Подробности — в _stale().
@@ -309,10 +367,21 @@ class Overlay:
             return
         except Exception:  # pragma: no cover
             log.exception("ошибка в обновлении оверлея")
+        # Пульсация точки: пока идёт запись, плашку надо перерисовывать, иначе
+        # волна замрёт. В остальных состояниях перерисовки нет вовсе — кадр
+        # стоит около 4 мс, и жечь их без нужды незачем.
+        if self._visible and self._state == "recording":
+            try:
+                self._show()
+            except Exception:  # pragma: no cover
+                log.exception("не удалось перерисовать плашку")
+
         try:
-            self.root.after(40, self._pump)
+            self.root.after(_PUMP_MS, self._pump)
         except tk.TclError:
             return
+
+    # --- отрисовка -------------------------------------------------------------
 
     def _apply(self, state, message, auto_hide_ms) -> None:
         if self._window is None:
@@ -325,41 +394,71 @@ class Overlay:
             self._hide_job = None
 
         if state is None:
+            self._state = None
             self._level = 0.0
-            self._draw_level()
-            self._place(visible=False)
+            self._visible = False
+            self._park()
             return
 
-        color, default_text = _STYLES.get(state, ("#8e8e93", ""))
-        text = message or default_text
-        if len(text) > 60:
-            text = text[:59] + "…"
-
-        if self._dot is not None:
-            self._dot.delete("all")
-            self._dot.create_oval(2, 2, 11, 11, fill=color, outline="")
-        if self._label is not None:
-            self._label.configure(text=text)
-
-        self._color = color
+        look = self.theme.state(state)
+        self._state = state
+        self._text = message or look.label
         if state not in _LIVE_STATES:
             # Записи нет — старый уровень на полоске врал бы про живой звук.
             self._level = 0.0
-        self._draw_level()
-
-        self._place(visible=True)
-        self._window.lift()
+        self._visible = True
+        self._show()
 
         if auto_hide_ms:
-            self._hide_job = self.root.after(auto_hide_ms, lambda: self._apply(None, None, None))
+            self._hide_job = self.root.after(
+                auto_hide_ms, lambda: self._apply(None, None, None)
+            )
 
     def _apply_level(self, value: float) -> None:
         self._level = _clamp01(value)
-        self._draw_level()
+        if self._visible:
+            self._show()
 
-    def _draw_level(self) -> None:
-        """Перерисовать полоску. Только поток Tk, только coords/itemconfigure."""
-        if self._bar is None or self._bar_item is None:
+    def _apply_theme(self, theme: Theme) -> None:
+        self.theme = theme
+        # Заготовки корпуса и точки посчитаны для прежней темы.
+        plate.clear_cache()
+        log.info("оформление плашки: %s", theme.name)
+        # Размер у новой темы может отличаться, а место — остаться прежним.
+        self._x, self._y = self._clamp_to_screen(self._x, self._y)
+        if self._visible:
+            self._show()
+        else:
+            self._park()
+
+    def _show(self) -> None:
+        """Нарисовать плашку и поставить её на место."""
+        if self._window is None or self._state is None:
             return
-        self._bar.coords(self._bar_item, 0, 0, _WIDTH * self._level, _BAR_HEIGHT)
-        self._bar.itemconfigure(self._bar_item, fill=self._color)
+        pad = self._pad
+        width, height = plate.plate_size(self.theme, self._scale)
+        x, y = self._x - pad, self._y - pad
+        try:
+            self._window.geometry(f"{width}x{height}+{x}+{y}")
+        except tk.TclError:
+            return
+
+        if not self._layered or self._hwnd is None:
+            return
+        image = plate.render(
+            self.theme, self._state, self._text, self._level, self._scale, self._phase()
+        )
+        plate.push(self._hwnd, image, x, y)
+
+    def _park(self) -> None:
+        """Увести плашку за край экрана, запомнив её место."""
+        if self._window is None:
+            return
+        width, height = plate.plate_size(self.theme, self._scale)
+        try:
+            self._window.geometry(f"{width}x{height}+{self._x}+{_HIDDEN_Y}")
+        except tk.TclError:
+            return
+        if self._layered and self._hwnd is not None and self._state is not None:
+            image = plate.render(self.theme, self._state, self._text, 0.0, self._scale)
+            plate.push(self._hwnd, image, self._x, _HIDDEN_Y)

@@ -1,22 +1,28 @@
-"""Дым-тесты интерфейса: виджеты строятся и переключают состояния без ошибок.
+"""Интерфейс: плашка состояния, её оформление и окно истории.
 
-Как это выглядит на экране, проверяется глазами. Здесь ловится другое —
-опечатки в Tk API и обращения к виджетам из чужого потока.
+Плашка рисуется картинкой в слоёном окне Windows, а не виджетами Tk, поэтому
+и проверяется здесь картинка — то, что человек в самом деле видит. Проверять
+поля объекта было бы удобнее и бесполезнее: они совпадали бы с ожидаемыми и
+при сломанной отрисовке.
 """
 
 from __future__ import annotations
 
-import itertools
 import logging
-import math
+from dataclasses import replace
+import threading
 import tkinter as tk
 
+import numpy as np
 import pytest
+from PIL import Image
 
+from whisperfree import plate
 from whisperfree.config import HistoryConfig
 from whisperfree.history import History, Record
 from whisperfree.history_window import HistoryWindow
-from whisperfree.overlay import _BG, _HIDDEN_Y, _STYLES, _WIDTH, Overlay
+from whisperfree.overlay import _HIDDEN_Y, Overlay
+from whisperfree.theme import Theme, load_themes, parse_color, pick
 
 
 def pump(root: tk.Tk, times: int = 6) -> None:
@@ -27,157 +33,44 @@ def pump(root: tk.Tk, times: int = 6) -> None:
         root.mainloop()
 
 
-def bar_width(overlay: Overlay) -> float:
-    """Ширина закрашенной части полоски уровня — то, что видит человек."""
-    x0, _y0, x1, _y1 = overlay._bar.coords(overlay._bar_item)
-    return x1 - x0
-
-
 def visible_y(overlay: Overlay) -> int:
     """Y из geometry: плашка прячется уводом за край, а не withdraw."""
     return int(overlay._window.geometry().rsplit("+", 1)[1])
 
 
-def dot_color(overlay: Overlay) -> str:
-    """Цвет кружка — то, чем состояния различаются на глаз, а не по подписи."""
-    return overlay._dot.itemcget(overlay._dot.find_all()[0], "fill")
-
-
-# --- сколько цветов в цвете ---------------------------------------------------
-#
-# «Цвета достаточно разные» — не вкус, а число. Разность RGB для этого не
-# годится: она считает #f00 и #0f0 такими же далёкими, как #700 и #007, хотя
-# глаз видит первую пару вдвое яснее. ΔE2000 меряет так, как видит глаз, и
-# минимум по всем парам показывает, насколько похожи самые похожие два
-# состояния. Формулы живут здесь, а не в overlay.py: на экране они не нужны
-# ни разу, а тесту без них остаётся только «цвета не равны».
-
-_D65 = (0.95047, 1.0, 1.08883)
-
-
-def _to_linear(channel: float) -> float:
-    return channel / 12.92 if channel <= 0.04045 else ((channel + 0.055) / 1.055) ** 2.4
-
-
-def _to_srgb(value: float) -> float:
-    value = min(max(value, 0.0), 1.0)
-    return value * 12.92 if value <= 0.0031308 else 1.055 * value ** (1 / 2.4) - 0.055
-
-
-def rgb(color: str) -> tuple[float, float, float]:
-    color = color.lstrip("#")
-    return tuple(int(color[i : i + 2], 16) / 255.0 for i in (0, 2, 4))
-
-
-def contrast(one: str, two: str) -> float:
-    """Контраст по WCAG: во сколько раз одна яркость больше другой."""
-    weights = (0.2126, 0.7152, 0.0722)
-    a, b = (
-        sum(w * _to_linear(c) for w, c in zip(weights, rgb(color)))
-        for color in (one, two)
+def shot(overlay: Overlay) -> np.ndarray:
+    """Картинка плашки в её текущем состоянии, RGBA как массив."""
+    image = plate.render(
+        overlay.theme, overlay._state, overlay._text, overlay._level, overlay._scale
     )
-    return (max(a, b) + 0.05) / (min(a, b) + 0.05)
+    return np.array(image)
 
 
-def lab(color: str) -> tuple[float, float, float]:
-    """CIELAB (D65) — пространство, в котором и считается ΔE2000."""
-    r, g, b = (_to_linear(c) for c in rgb(color))
-    xyz = (
-        0.4124564 * r + 0.3575761 * g + 0.1804375 * b,
-        0.2126729 * r + 0.7151522 * g + 0.0721750 * b,
-        0.0193339 * r + 0.1191920 * g + 0.9503041 * b,
-    )
+def dot_color(overlay: Overlay) -> tuple[int, int, int]:
+    """Цвет точки статуса прямо с картинки.
 
-    def f(t: float) -> float:
-        return t ** (1 / 3) if t > (6 / 29) ** 3 else t / (3 * (6 / 29) ** 2) + 4 / 29
-
-    fx, fy, fz = (f(v / w) for v, w in zip(xyz, _D65))
-    return (116 * fy - 16, 500 * (fx - fy), 200 * (fy - fz))
+    Точка — то, чем состояния различаются боковым зрением; подпись в этот
+    момент человек не читает, он смотрит туда, куда диктует.
+    """
+    geo = overlay.theme.geometry
+    pixels = shot(overlay)
+    pad = plate.shadow_padding(overlay.theme, overlay._scale)
+    x = int(pad + (geo.padding_x + geo.dot_diameter / 2) * overlay._scale)
+    y = int(pad + geo.height * overlay._scale / 2)
+    return tuple(int(v) for v in pixels[y, x, :3])
 
 
-def delta_e(one: str, two: str) -> float:
-    """Насколько два цвета различны для глаза. Ниже единицы — не различить."""
-    return _delta_e_lab(lab(one), lab(two))
-
-
-def _delta_e_lab(first, second) -> float:
-    """CIEDE2000. Сверен с эталонными парами Шармы — см. тест ниже."""
-    l1, a1, b1 = first
-    l2, a2, b2 = second
-    c1, c2 = math.hypot(a1, b1), math.hypot(a2, b2)
-    cbar = (c1 + c2) / 2
-    g = 0.5 * (1 - math.sqrt(cbar**7 / (cbar**7 + 25.0**7))) if cbar else 0.5
-    a1p, a2p = (1 + g) * a1, (1 + g) * a2
-    c1p, c2p = math.hypot(a1p, b1), math.hypot(a2p, b2)
-    h1p = math.degrees(math.atan2(b1, a1p)) % 360
-    h2p = math.degrees(math.atan2(b2, a2p)) % 360
-
-    if c1p * c2p == 0:
-        dhp, hbar = 0.0, h1p + h2p
-    else:
-        dhp = (h2p - h1p + 540) % 360 - 180
-        if abs(h1p - h2p) <= 180:
-            hbar = (h1p + h2p) / 2
-        elif h1p + h2p < 360:
-            hbar = (h1p + h2p + 360) / 2
-        else:
-            hbar = (h1p + h2p - 360) / 2
-
-    dl, dc = l2 - l1, c2p - c1p
-    dh = 2 * math.sqrt(c1p * c2p) * math.sin(math.radians(dhp) / 2)
-    lbar, cbarp = (l1 + l2) / 2, (c1p + c2p) / 2
-
-    t = (
-        1
-        - 0.17 * math.cos(math.radians(hbar - 30))
-        + 0.24 * math.cos(math.radians(2 * hbar))
-        + 0.32 * math.cos(math.radians(3 * hbar + 6))
-        - 0.20 * math.cos(math.radians(4 * hbar - 63))
-    )
-    sl = 1 + (0.015 * (lbar - 50) ** 2) / math.sqrt(20 + (lbar - 50) ** 2)
-    sc = 1 + 0.045 * cbarp
-    sh = 1 + 0.015 * cbarp * t
-    rt = -2 * math.sqrt(cbarp**7 / (cbarp**7 + 25.0**7)) * math.sin(
-        math.radians(60 * math.exp(-(((hbar - 275) / 25) ** 2)))
-    )
-    return math.sqrt(
-        (dl / sl) ** 2 + (dc / sc) ** 2 + (dh / sh) ** 2 + rt * (dc / sc) * (dh / sh)
-    )
-
-
-def hue(color: str) -> float:
-    """Угол тона в CIELAB: у чистого красного ≈40°, у зелёного ≈136°."""
-    _l, a, b = lab(color)
-    return math.degrees(math.atan2(b, a)) % 360
-
-
-# Матрицы Machado, Oliveira, Fernandes (2009), тяжесть 1.0 — то, как цвет
-# доходит до глаза без красного (протанопия) или без зелёного (дейтеранопия)
-# колбочкового пигмента. Считаются по линейному RGB.
-DEUTERANOPIA = (
-    (0.367322, 0.860646, -0.227968),
-    (0.280085, 0.672501, 0.047413),
-    (-0.011820, 0.042940, 0.968881),
-)
-PROTANOPIA = (
-    (0.152286, 1.052583, -0.204868),
-    (0.114503, 0.786281, 0.099216),
-    (-0.003882, -0.048116, 1.051998),
-)
-
-
-def as_seen_by(color: str, matrix) -> str:
-    linear = [_to_linear(c) for c in rgb(color)]
-    out = (_to_srgb(sum(m * v for m, v in zip(row, linear))) for row in matrix)
-    return "#%02x%02x%02x" % tuple(round(c * 255) for c in out)
-
-
-def closest_pair(eye=lambda color: color) -> tuple[float, str, str]:
-    """Два самых похожих состояния и ΔE между ними — узкое место палитры."""
-    return min(
-        (delta_e(eye(_STYLES[one][0]), eye(_STYLES[two][0])), one, two)
-        for one, two in itertools.combinations(_STYLES, 2)
-    )
+def bar_width(overlay: Overlay) -> int:
+    """Ширина закрашенной части полоски уровня в пикселях."""
+    geo = overlay.theme.geometry
+    pixels = shot(overlay)
+    accent = np.array(overlay.theme.state(overlay._state or "recording").accent[:3])
+    pad = plate.shadow_padding(overlay.theme, overlay._scale)
+    row = int(pad + (geo.height - geo.bar_height - 2) * overlay._scale)
+    row = max(0, min(pixels.shape[0] - 1, row))
+    band = pixels[row, :, :3].astype(int)
+    close = np.all(np.abs(band - accent) < 40, axis=1)
+    return int(close.sum())
 
 
 class TestOverlay:
@@ -195,449 +88,535 @@ class TestOverlay:
         overlay.hide()
         pump(root)  # ошибок в очереди быть не должно
 
-    def test_long_message_is_truncated(self, root):
-        overlay = Overlay(root, enabled=True)
-        overlay.error("очень длинная причина " * 20)
-        pump(root)
-        assert len(overlay._label.cget("text")) <= 60
-
     def test_disabled_overlay_builds_no_window(self, root):
         overlay = Overlay(root, enabled=False)
         assert overlay._window is None
         overlay.recording()
-        overlay.error("не должно упасть")
+        overlay.level(0.5)
+        overlay.hide()
         pump(root)
 
     def test_calls_from_other_thread_are_safe(self, root):
-        import threading
-
         overlay = Overlay(root, enabled=True)
-        threads = [threading.Thread(target=overlay.recording) for _ in range(4)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
+
+        def worker():
+            for _ in range(20):
+                overlay.recording()
+                overlay.level(0.4)
+                overlay.ok("готово")
+
+        thread = threading.Thread(target=worker)
+        thread.start()
+        thread.join()
         pump(root)
 
-
-class TestOverlayLevel:
-    """Живой уровень: человек должен видеть, что микрофон слышит, ПО ХОДУ речи."""
-
-    def test_level_reaches_the_widget(self, root):
+    def test_hidden_plate_goes_off_screen(self, root):
         overlay = Overlay(root, enabled=True)
         overlay.recording()
-        overlay.level(0.5)
         pump(root)
+        assert visible_y(overlay) != _HIDDEN_Y
+        overlay.hide()
+        pump(root)
+        assert visible_y(overlay) == _HIDDEN_Y
 
-        assert overlay._level == pytest.approx(0.5)
-        assert bar_width(overlay) == pytest.approx(_WIDTH * 0.5)
+
+class TestPlateDrawing:
+    """Картинка плашки — единственное, что видит человек."""
+
+    def test_size_matches_the_layout(self, root):
+        overlay = Overlay(root, enabled=True)
+        geo = overlay.theme.geometry
+        # Картинка больше капсулы: вокруг неё поле под тень, иначе тень
+        # обрезалась бы по краю окна и превращалась в тёмную полосу.
+        pad = plate.shadow_padding(overlay.theme)
+        image = plate.render(overlay.theme, "recording", "Запись…")
+        assert image.size == (geo.width + pad * 2, geo.height + pad * 2)
+        assert image.size == plate.plate_size(overlay.theme)
+        assert image.mode == "RGBA"
+
+    def test_corners_are_transparent_and_middle_is_not(self, root):
+        # Капсула, а не прямоугольник: углы обязаны быть пустыми, иначе поверх
+        # документа висит непрозрачная плитка.
+        overlay = Overlay(root, enabled=True)
+        pixels = np.array(plate.render(overlay.theme, "recording", "Запись…"))
+        pad = plate.shadow_padding(overlay.theme)
+        assert pixels[pad, pad, 3] < 60, "угол капсулы непрозрачен"
+        middle = pixels[pixels.shape[0] // 2, pixels.shape[1] // 2, 3]
+        assert middle > 0
+
+    def test_the_glass_lets_the_document_through(self, root):
+        # Ради этого макет и рисовался: 13% заливки, текст под плашкой читается.
+        overlay = Overlay(root, enabled=True)
+        pixels = np.array(plate.render(overlay.theme, "recording", "Запись…"))
+        pad = plate.shadow_padding(overlay.theme)
+        centre = pixels[pixels.shape[0] // 2, pixels.shape[1] - pad - 20, 3]
+        assert 0 < centre < 120, f"заливка непрозрачна: альфа {centre}"
+
+    def test_nothing_escapes_the_capsule(self, root):
+        # Полоска уровня идёт по прямой с отступом 14 px, а у пилюли радиус
+        # равен половине высоты: у нижнего края форма сужается, и без маски
+        # концы полоски торчали наружу двумя усами.
+        overlay = Overlay(root, enabled=True)
+        pixels = np.array(plate.render(overlay.theme, "recording", "Запись…", level=1.0))
+        pad = plate.shadow_padding(overlay.theme)
+        alpha = pixels[:, :, 3]
+        bottom = alpha[-pad - 2]
+        top = alpha[alpha.shape[0] // 2]
+        assert int((bottom > 8).sum()) < int((top > 8).sum())
 
     def test_level_grows_with_the_voice(self, root):
         overlay = Overlay(root, enabled=True)
         overlay.recording()
-        overlay.level(0.1)
         pump(root)
-        quiet = bar_width(overlay)
+        widths = []
+        for value in (0.0, 0.5, 1.0):
+            overlay.level(value)
+            pump(root)
+            widths.append(bar_width(overlay))
+        assert widths[0] < widths[1] < widths[2], widths
 
-        overlay.level(0.8)
-        pump(root)
-        assert bar_width(overlay) > quiet
+    def test_long_message_is_cut_to_fit(self, root):
+        overlay = Overlay(root, enabled=True)
+        font = plate.find_font(overlay.theme.geometry.font_size)
+        cut = plate._fit("очень длинная причина " * 10, font, 120)
+        assert cut.endswith("…")
+        assert font.getlength(cut) <= 120
 
-    @pytest.mark.parametrize(
-        "value, expected",
-        [
-            (-1.0, 0.0),
-            (-0.0001, 0.0),
-            (1.5, 1.0),
-            (float("inf"), 1.0),
-            (float("-inf"), 0.0),
-            (float("nan"), 0.0),
-            (None, 0.0),
-            ("громко", 0.0),
-            (0.0, 0.0),
-            (1.0, 1.0),
-        ],
-    )
-    def test_level_out_of_range_does_not_break_drawing(self, root, value, expected):
+    def test_short_message_is_left_alone(self, root):
+        overlay = Overlay(root, enabled=True)
+        font = plate.find_font(overlay.theme.geometry.font_size)
+        assert plate._fit("Готово", font, 120) == "Готово"
+
+
+def over_white(image) -> np.ndarray:
+    """Картинка, положенная на белый лист.
+
+    Мерить по сырым каналам нельзя: там, где альфа мала, значения RGB ничего
+    не значат — они остались от того, чем рисовали. Человек же видит именно
+    результат наложения на документ, обычно светлый.
+    """
+    sheet = Image.new("RGB", image.size, (255, 255, 255))
+    sheet.paste(image, (0, 0), image)
+    return np.array(sheet, dtype=int)
+
+
+def top_edge_colors(overlay: Overlay) -> list[tuple[int, int, int]]:
+    """Цвет самого верхнего непрозрачного пикселя вдоль верхней кромки.
+
+    Ровно там пользователь и увидел разрывы: светлая внутренняя грань,
+    нарисованная прямой чертой на постоянной высоте, у краёв ложилась поверх
+    тёмного канта — а верхний край капсулы к углам загибается вниз.
+    """
+    geo = overlay.theme.geometry
+    pad = plate.shadow_padding(overlay.theme, overlay._scale)
+    pixels = shot(overlay)
+    width = int(geo.width * overlay._scale)
+    out = []
+    for x in range(pad + 8, pad + width - 8):
+        column = pixels[:, x]
+        rows = np.nonzero(column[:, 3] > 140)[0]
+        if len(rows):
+            out.append(tuple(int(v) for v in column[rows[0], :3]))
+    return out
+
+
+class TestTheLookFromTheSpec:
+    """Слои из макета, которые видно глазом: кант, тень, свечение, пульс."""
+
+    def test_the_top_rim_is_not_broken(self, root):
         overlay = Overlay(root, enabled=True)
         overlay.recording()
-        overlay.level(value)
-        pump(root)
+        colors = top_edge_colors(overlay)
+        assert colors, "верхнюю кромку не нашли"
+        brightest = max(sum(c) for c in colors)
+        darkest = min(sum(c) for c in colors)
+        assert brightest - darkest < 210, f"кант рвётся: от {darkest} до {brightest}"
 
-        assert overlay._level == pytest.approx(expected)
-        assert bar_width(overlay) == pytest.approx(_WIDTH * expected)
+    def test_the_plate_casts_a_shadow(self, root):
+        # box-shadow: 0 6px 16px в макете. Без тени капсула лежит на экране
+        # плоской наклейкой, а не парит над документом.
+        overlay = Overlay(root, enabled=True)
+        pixels = np.array(plate.render(overlay.theme, "recording", "Запись…"))
+        pad = plate.shadow_padding(overlay.theme)
+        assert pixels[-pad // 2, pixels.shape[1] // 2, 3] > 0, "под плашкой нет тени"
 
-    def test_level_from_another_thread_is_safe(self, root):
-        import threading
+    def test_the_dot_glows(self, root):
+        # box-shadow: 0 0 8px цветом состояния. Свечение берётся из темы
+        # (dot_glow_rgba), а не выводится из цвета точки.
+        #
+        # Сравниваем с той же темой без свечения, а не с порогом: внутри
+        # капсулы и так есть заливка, и любой порог показал бы «что-то есть»
+        # даже при полностью выключенном свечении.
+        overlay = Overlay(root, enabled=True)
+        theme = overlay.theme
+        geo = theme.geometry
+        pad = plate.shadow_padding(theme)
+        row = int(pad + geo.height / 2)
+        # Сразу за краем точки: там свечение сильнее всего, дальше оно тает.
+        beside = int(pad + (geo.padding_x + geo.dot_diameter / 2) + geo.dot_diameter * 0.75)
 
+        dark = replace(
+            theme,
+            id=theme.id + "-без-свечения",
+            states={
+                name: replace(look, glow=(0, 0, 0, 0))
+                for name, look in theme.states.items()
+            },
+        )
+        plate.clear_cache()
+        with_glow = over_white(plate.render(theme, "recording", "Запись…"))
+        plate.clear_cache()
+        without = over_white(plate.render(dark, "recording", "Запись…"))
+        plate.clear_cache()
+
+        assert with_glow[row, beside].sum() < without[row, beside].sum(), (
+            f"свечения не видно: со свечением {with_glow[row, beside].sum()}, "
+            f"без {without[row, beside].sum()}"
+        )
+
+    def test_the_ripple_grows_with_the_phase(self, root):
+        # ripple 1.6s: круг растёт от 1 до 2.2 и гаснет. Это та самая
+        # пульсация, по которой видно, что программа слушает.
+        overlay = Overlay(root, enabled=True)
+        geo = overlay.theme.geometry
+        pad = plate.shadow_padding(overlay.theme)
+        row = int(pad + geo.height / 2)
+        centre = int(pad + (geo.padding_x + geo.dot_diameter / 2))
+        # Смотрим на кольцо, которое лежит ВНЕ маленькой волны и ВНУТРИ
+        # большой: радиус волны равен половине точки, умноженной на 1 + 1.2·фаза.
+        # Считать пиксели ярче порога бессмысленно — внутри капсулы есть
+        # заливка, и счётчик упирается в потолок при любой фазе.
+        sample = centre + int(geo.dot_diameter * 0.625)
+        shades = []
+        for phase in (0.05, 0.45):
+            pixels = over_white(
+                plate.render(overlay.theme, "recording", "Запись…", phase=phase)
+            )
+            shades.append(int(pixels[row, sample].sum()))
+        assert shades[1] < shades[0], f"волна не растёт: {shades}"
+
+    def test_the_pulse_only_runs_while_recording(self, root):
+        # В остальных состояниях перерисовки нет вовсе: кадр стоит около 4 мс,
+        # и жечь их без нужды незачем.
+        overlay = Overlay(root, enabled=True)
+        overlay._state = "sending"
+        assert overlay._phase() == 0.0
+        overlay._state = "recording"
+        assert 0.0 <= overlay._phase() < 1.0
+
+
+class TestOverlayLevel:
+    def test_level_out_of_range_does_not_break_drawing(self, root):
         overlay = Overlay(root, enabled=True)
         overlay.recording()
-        threads = [
-            threading.Thread(target=overlay.level, args=(i / 10,)) for i in range(10)
-        ]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
-        pump(root)
-
-    def test_level_on_disabled_overlay_does_not_crash(self, root):
-        overlay = Overlay(root, enabled=False)
-        overlay.level(0.5)
-        overlay.silent()
-        pump(root)
-        assert overlay._window is None
+        for value in (-1.0, 2.0, float("nan"), float("inf"), None, "нет"):
+            overlay.level(value)
+            pump(root, 2)
+        assert 0.0 <= overlay._level <= 1.0
 
     def test_level_resets_when_recording_ends(self, root):
         overlay = Overlay(root, enabled=True)
         overlay.recording()
         overlay.level(0.9)
         pump(root)
-        assert bar_width(overlay) > 0
-
-        overlay.sending()
+        overlay.ok("готово")
         pump(root)
-        assert bar_width(overlay) == pytest.approx(0.0)
+        assert overlay._level == 0.0
 
     def test_hide_clears_the_level(self, root):
         overlay = Overlay(root, enabled=True)
         overlay.recording()
-        overlay.level(0.9)
+        overlay.level(0.8)
         pump(root)
-
         overlay.hide()
         pump(root)
-        assert overlay._level == pytest.approx(0.0)
-        assert bar_width(overlay) == pytest.approx(0.0)
+        assert overlay._level == 0.0
 
 
 class TestOverlaySilent:
-    """Молчащий микрофон виден на середине фразы, а не после отпускания."""
-
     def test_silent_has_its_own_look(self, root):
-        color, text = _STYLES["silent"]
-        assert text
-        assert color != _STYLES["recording"][0]
-        assert color != _STYLES["error"][0]
-
         overlay = Overlay(root, enabled=True)
+        overlay.recording()
+        pump(root)
+        recording = dot_color(overlay)
         overlay.silent()
         pump(root)
-        assert overlay._label.cget("text") == text
+        assert overlay._text == overlay.theme.state("silent").label
+        assert dot_color(overlay) != recording
 
     def test_recording_to_silent_and_back(self, root):
         overlay = Overlay(root, enabled=True)
-
-        overlay.recording()
-        pump(root)
-        assert overlay._label.cget("text") == _STYLES["recording"][1]
-
-        overlay.silent()
-        pump(root)
-        assert overlay._label.cget("text") == _STYLES["silent"][1]
-
-        overlay.recording()
-        overlay.level(0.4)
-        pump(root)
-        assert overlay._label.cget("text") == _STYLES["recording"][1]
-        assert bar_width(overlay) == pytest.approx(_WIDTH * 0.4)
-
-    def test_silent_keeps_the_running_level(self, root):
-        overlay = Overlay(root, enabled=True)
-        overlay.recording()
-        overlay.level(0.02)
-        overlay.silent()
-        pump(root)
-
-        # Запись идёт, полоску не обнуляем — она честно показывает почти ноль.
-        assert overlay._level == pytest.approx(0.02)
+        for _ in range(3):
+            overlay.recording()
+            pump(root, 2)
+            assert overlay._state == "recording"
+            overlay.silent()
+            pump(root, 2)
+            assert overlay._state == "silent"
 
     def test_silent_does_not_auto_hide(self, root):
+        # Клавишу всё ещё держат: плашка обязана остаться на экране.
         overlay = Overlay(root, enabled=True)
         overlay.silent()
         pump(root)
-
         assert overlay._hide_job is None
-        assert visible_y(overlay) != _HIDDEN_Y
 
     def test_recording_does_not_auto_hide(self, root):
         overlay = Overlay(root, enabled=True)
         overlay.recording()
         pump(root)
-
         assert overlay._hide_job is None
-        assert visible_y(overlay) != _HIDDEN_Y
 
     def test_error_still_auto_hides(self, root):
         overlay = Overlay(root, enabled=True)
         overlay.error("сеть недоступна")
         pump(root)
-
         assert overlay._hide_job is not None
 
     def test_silent_cancels_a_pending_auto_hide(self, root):
         overlay = Overlay(root, enabled=True)
-        overlay.error("сеть недоступна")
+        overlay.ok("готово")
         pump(root)
-        assert overlay._hide_job is not None
-
         overlay.silent()
         pump(root)
         assert overlay._hide_job is None
-        assert visible_y(overlay) != _HIDDEN_Y
 
 
-class TestOverlayColors:
-    """Цвет виден боковым зрением, подпись — нет: у состояний он должен различаться.
+class TestThemes:
+    """Оформление лежит в JSON: его правит человек, значит оно бывает битым."""
 
-    Пороги ниже — закреплённые числа, а не пожелания. Палитра подбиралась
-    перебором под максимум минимальной попарной ΔE2000, и если следующая
-    правка цветов уронит этот минимум, тест обязан упасть, а не смолчать.
-    """
+    def test_primary_is_first(self):
+        themes = load_themes()
+        assert next(iter(themes)) == "warm_smoky_mocha"
 
-    # Достигнутый минимум по всем 15 парам — 39.0 (было 19.4). Порог чуть ниже:
-    # место для округлений, но не для «подкрутил цвет, стало 25, никто не
-    # заметил».
-    MIN_DELTA_E = 38.0
-    # То же для дихроматов: достигнуто 12.0 (было 7.1). Узкое место там —
-    # «Готово» против «Ошибки»: зелёное и красное заданы смыслом и по тону для
-    # такого глаза сходятся, разводит их только светлота.
-    MIN_DELTA_E_CVD = 11.0
+    def test_every_theme_knows_every_state(self):
+        for theme in load_themes().values():
+            for state in ("recording", "silent", "sending", "refining", "ok", "error"):
+                look = theme.state(state)
+                assert look.label
+                assert len(look.accent) == 4
 
-    def test_delta_e_matches_the_reference_pairs(self):
-        """Сначала поверяем линейку: пары из набора Шармы для CIEDE2000.
+    def test_meaning_survives_the_theme(self):
+        # Тема меняет корпус плашки и огонёк записи, но не смысл: «Ошибка»
+        # обязана быть красной в любом оформлении, иначе тема, подобранная
+        # под цвет канта, спрячет поломку.
+        for theme in load_themes().values():
+            red, green, blue, _ = theme.state("error").accent
+            assert red > green and red > blue, theme.id
+            red, green, blue, _ = theme.state("ok").accent
+            assert green > red, theme.id
 
-        Без этого «минимум 38» — число из ниоткуда: ошибись в формуле, и тест
-        будет уверенно охранять неправильную величину.
-        """
-        reference = [
-            ((50.0, 2.6772, -79.7751), (50.0, 0.0, -82.7485), 2.0425),
-            ((50.0, 2.8361, -74.0200), (50.0, 0.0, -82.7485), 3.4412),
-            ((50.0, -1.3802, -84.2814), (50.0, 0.0, -82.7485), 1.0000),
-            ((60.2574, -34.0099, 36.2677), (60.4626, -34.1751, 39.4387), 1.2644),
-            ((22.7233, 20.0904, -46.6940), (23.0331, 14.9730, -42.5619), 2.0373),
-            ((50.0, 2.4900, -0.0010), (50.0, -2.4900, 0.0009), 7.1792),
-            ((50.0, 2.5, 0.0), (50.0, 0.0, -2.5), 4.3065),
-            ((50.0, 2.5, 0.0), (73.0, 25.0, -18.0), 27.1492),
-        ]
-        for first, second, expected in reference:
-            assert _delta_e_lab(first, second) == pytest.approx(expected, abs=1e-4)
-
-    def test_no_two_states_look_alike(self):
-        """Узкое место палитры — самая похожая пара; она и должна быть далеко."""
-        distance, one, two = closest_pair()
-        assert distance >= self.MIN_DELTA_E, f"ближе всех {one} и {two}: ΔE {distance:.1f}"
-
-    def test_recording_and_error_cannot_be_confused(self):
-        # Та самая пара, ради которой всё затевалось: боковым зрением человек
-        # должен мгновенно понимать, идёт запись или что-то сломалось.
-        # Было 22.9 (розовый против красного) — на глаз почти одно и то же.
-        assert delta_e(_STYLES["recording"][0], _STYLES["error"][0]) >= 35.0
-
-    def test_every_color_is_readable_on_the_plate(self):
-        """Контраст к фону плашки не ниже 4.5:1 — иначе цвет не разглядеть."""
-        for state, (color, _text) in _STYLES.items():
-            assert contrast(color, _BG) >= 4.5, f"{state} {color} тонет в фоне"
-
-    def test_meanings_survive_the_repaint(self):
-        """Ошибка тревожная, «Готово» зелёное, «микрофон молчит» синий.
-
-        На все три ссылаются комментарии в __main__.py и в самом overlay.py;
-        подбор палитры не имеет права молча их перекрасить.
-        """
-        assert 15.0 <= hue(_STYLES["error"][0]) <= 46.0  # у чистого красного 40°
-        assert 125.0 <= hue(_STYLES["ok"][0]) <= 175.0
-        assert 245.0 <= hue(_STYLES["silent"][0]) <= 305.0
+    def test_duplicates_are_not_offered_twice(self):
+        # Утверждённый макет лежит в двух файлах под разными именами.
+        # Два одинаковых пункта в меню заставили бы гадать, чем они отличаются.
+        themes = load_themes()
+        signatures = [theme.signature for theme in themes.values()]
+        assert len(signatures) == len(set(signatures))
 
     @pytest.mark.parametrize(
-        "eye", [DEUTERANOPIA, PROTANOPIA], ids=["дейтеранопия", "протанопия"]
+        "text, expected",
+        [
+            ("rgba(48, 40, 36, 0.13)", (48, 40, 36, 33)),
+            ("rgb(1, 2, 3)", (1, 2, 3, 255)),
+            ("#1C1917", (28, 25, 23, 255)),
+            ("#fff", (255, 255, 255, 255)),
+        ],
     )
-    def test_colour_blind_eyes_still_tell_the_states_apart(self, eye):
-        """Красное и зелёное для дихромата почти одно и то же — но не здесь.
+    def test_colours_are_parsed(self, text, expected):
+        assert parse_color(text) == expected
 
-        Красный у ошибки и зелёный у «Готово» заданы смыслом, поэтому по тону
-        они для такого глаза сходятся, и развести их может только светлота.
-        """
-        distance, one, two = closest_pair(lambda color: as_seen_by(color, eye))
-        assert distance >= self.MIN_DELTA_E_CVD, (
-            f"ближе всех {one} и {two}: ΔE {distance:.1f}"
-        )
+    @pytest.mark.parametrize("junk", ["", "синий", None, 42, "rgba()", "#zz"])
+    def test_broken_colour_does_not_crash(self, junk):
+        assert parse_color(junk, default=(1, 2, 3, 4)) == (1, 2, 3, 4)
 
-    def test_recording_and_error_do_not_share_a_color(self):
-        # Красная «Запись…» и красная «Ошибка» отличались только буквами —
-        # ровно то, чего полоска уровня и цвета заводились не допускать.
-        assert _STYLES["recording"][0] != _STYLES["error"][0]
+    def test_missing_files_still_give_a_theme(self, tmp_path):
+        # Без плашки программа становится молчаливой, а это ровно та беда,
+        # от которой плашка и заведена.
+        themes = load_themes(tmp_path)
+        assert themes
+        assert pick(themes, None).state("recording").label
 
-    def test_every_state_has_its_own_color(self):
-        colors = [color for color, _text in _STYLES.values()]
-        assert len(set(colors)) == len(_STYLES)
+    def test_unknown_name_falls_back_to_primary(self, caplog):
+        themes = load_themes()
+        with caplog.at_level(logging.WARNING):
+            chosen = pick(themes, "такой-темы-нет")
+        assert chosen.id == next(iter(themes))
+        assert "такой-темы-нет" in caplog.text
 
-    def test_dot_changes_color_from_recording_to_error(self, root):
-        overlay = Overlay(root, enabled=True)
+    def test_switching_changes_what_is_drawn(self, root):
+        themes = load_themes()
+        overlay = Overlay(root, enabled=True, theme=themes["warm_smoky_mocha"])
         overlay.recording()
         pump(root)
-        recording_color = dot_color(overlay)
+        before = dot_color(overlay)
 
-        overlay.error("сеть недоступна")
+        overlay.set_theme(themes["graphite_coral_accent"])
         pump(root)
-        assert dot_color(overlay) != recording_color
+        assert overlay.theme.id == "graphite_coral_accent"
+        assert dot_color(overlay) != before
+
+
+class TestDragging:
+    """Плашку можно перетащить: она висит поверх всего и кому-то мешает."""
+
+    class Event:
+        def __init__(self, x, y):
+            self.x_root, self.y_root = x, y
+
+    def test_drag_moves_the_plate(self, root):
+        overlay = Overlay(root, enabled=True, position=(100, 100))
+        overlay.recording()
+        pump(root)
+
+        overlay._grab(self.Event(150, 120))
+        overlay._drag(self.Event(250, 220))
+        assert (overlay._x, overlay._y) == (200, 200)
+
+    def test_the_new_place_is_remembered(self, root):
+        seen = []
+        overlay = Overlay(
+            root, enabled=True, position=(100, 100), on_move=lambda x, y: seen.append((x, y))
+        )
+        overlay._grab(self.Event(100, 100))
+        overlay._drag(self.Event(300, 260))
+        overlay._drop(self.Event(300, 260))
+        assert seen == [(overlay._x, overlay._y)]
+
+    def test_a_click_without_moving_does_not_jump(self, root):
+        overlay = Overlay(root, enabled=True, position=(120, 140))
+        overlay._grab(self.Event(130, 150))
+        overlay._drag(self.Event(130, 150))
+        assert (overlay._x, overlay._y) == (120, 140)
+
+    def test_the_plate_cannot_leave_the_screen(self, root):
+        # Экран могли отключить или сменить разрешение, а место осталось от
+        # прошлой раскладки: плашка нашлась бы за границей и выглядела бы
+        # как «перестала показываться».
+        overlay = Overlay(root, enabled=True)
+        overlay._grab(self.Event(0, 0))
+        overlay._drag(self.Event(-5000, -5000))
+        assert overlay._x >= 0 and overlay._y >= 0
+
+        overlay._grab(self.Event(overlay._x, overlay._y))
+        overlay._drag(self.Event(50000, 50000))
+        width, height = overlay.size
+        assert overlay._x <= root.winfo_screenwidth() - width
+        assert overlay._y <= root.winfo_screenheight() - height
+
+    def test_a_remembered_place_is_used_at_start(self, root):
+        overlay = Overlay(root, enabled=True, position=(321, 234))
+        assert (overlay._x, overlay._y) == (321, 234)
+
+    def test_saving_that_fails_does_not_break_the_drag(self, root, caplog):
+        def explode(x, y):
+            raise OSError("конфиг только для чтения")
+
+        overlay = Overlay(root, enabled=True, position=(10, 10), on_move=explode)
+        overlay._grab(self.Event(10, 10))
+        overlay._drag(self.Event(60, 60))
+        with caplog.at_level(logging.ERROR):
+            overlay._drop(self.Event(60, 60))
+        assert (overlay._x, overlay._y) == (60, 60)
+        assert "положение" in caplog.text
 
 
 class TestOverlaySession:
-    """Плашка одна на все диктовки: хвост прошлой не должен гасить следующую."""
-
     def test_begin_session_returns_growing_numbers(self, root):
         overlay = Overlay(root, enabled=True)
-        assert overlay.begin_session() < overlay.begin_session()
+        assert [overlay.begin_session() for _ in range(3)] == [1, 2, 3]
 
     def test_stale_ok_does_not_overwrite_the_running_recording(self, root, caplog):
         overlay = Overlay(root, enabled=True)
         stale = overlay.begin_session()
-        overlay.begin_session()  # человек нажал клавишу заново
+        overlay.begin_session()
         overlay.recording()
-        pump(root, 3)
+        pump(root)
 
         with caplog.at_level(logging.DEBUG, logger="whisperfree.overlay"):
-            overlay.ok("хвост прошлой диктовки", session=stale)
-            pump(root, 3)
+            overlay.ok("текст прошлой диктовки", stale)
+            pump(root)
 
-        assert overlay._label.cget("text") == _STYLES["recording"][1]
-        assert overlay._hide_job is None  # и авто-скрытия от старого «Готово» нет
-        assert visible_y(overlay) != _HIDDEN_Y
-        # Отброс без следа в логе отладить было бы нечем.
-        assert any(
-            record.levelno == logging.DEBUG and "отбросил" in record.getMessage()
-            for record in caplog.records
-        )
+        assert overlay._state == "recording"
+        assert overlay._hide_job is None
+        assert "опоздавшее" in caplog.text
 
     def test_stale_error_does_not_overwrite_the_running_recording(self, root):
         overlay = Overlay(root, enabled=True)
         stale = overlay.begin_session()
         overlay.begin_session()
         overlay.recording()
-        pump(root, 3)
+        pump(root)
 
-        overlay.error("сеть недоступна", session=stale)
-        pump(root, 3)
+        overlay.error("ошибка прошлой диктовки", stale)
+        pump(root)
+        assert overlay._state == "recording"
 
-        assert overlay._label.cget("text") == _STYLES["recording"][1]
-        assert overlay._hide_job is None
+    def test_stale_refining_does_not_overwrite_it_either(self, root):
+        overlay = Overlay(root, enabled=True)
+        stale = overlay.begin_session()
+        overlay.begin_session()
+        overlay.recording()
+        pump(root)
+
+        overlay.refining(stale)
+        pump(root)
+        assert overlay._state == "recording"
 
     def test_ok_from_the_current_session_is_shown(self, root):
         overlay = Overlay(root, enabled=True)
         current = overlay.begin_session()
         overlay.recording()
-        pump(root, 3)
-
-        overlay.ok("готовый текст", session=current)
-        pump(root, 3)
-
-        assert overlay._label.cget("text") == "готовый текст"
-        assert overlay._hide_job is not None
+        pump(root)
+        overlay.ok("всё получилось", current)
+        pump(root)
+        assert overlay._state == "ok"
 
     def test_call_without_a_session_works_as_before(self, root):
         overlay = Overlay(root, enabled=True)
         overlay.begin_session()
-        overlay.begin_session()
         overlay.recording()
-        pump(root, 3)
-
-        # Поколение есть, но вызывающий его не знает — сообщение проходит.
-        overlay.ok("без поколения")
-        pump(root, 3)
-        assert overlay._label.cget("text") == "без поколения"
-
-        overlay.error("тоже без поколения")
-        pump(root, 3)
-        assert overlay._label.cget("text") == "тоже без поколения"
+        pump(root)
+        overlay.ok("без номера")
+        pump(root)
+        assert overlay._state == "ok"
 
     def test_new_state_cancels_the_hanging_auto_hide(self, root):
-        """Отложенное скрытие прошлой диктовки не гасит только что зажжённую плашку."""
         overlay = Overlay(root, enabled=True)
-        overlay.ok("прошлая диктовка")
-        pump(root, 3)
+        overlay.ok("готово")
+        pump(root)
         assert overlay._hide_job is not None
-
         overlay.recording()
-        pump(root, 3)
-
+        pump(root)
         assert overlay._hide_job is None
-        assert overlay._label.cget("text") == _STYLES["recording"][1]
-        assert visible_y(overlay) != _HIDDEN_Y
 
-    @pytest.mark.parametrize("say", ["ok", "error"])
-    def test_message_gone_stale_between_check_and_show_is_dropped(
-        self, root, caplog, monkeypatch, say
-    ):
-        """Щель между проверкой поколения и показом.
-
-        В error() между _stale() и _push() стоит log.warning — синхронная
-        запись на диск, и это не единственная задержка: поток может уступить
-        процессор в любой точке. Клавишу успевают нажать ровно там, и тогда
-        сообщение, признанное свежим, доходит до плашки уже устаревшим —
-        и гасит только что зажжённую «Запись…».
-        """
-        overlay = Overlay(root, enabled=True)
-        stale = overlay.begin_session()
-        overlay.recording()
-        pump(root, 3)
-
-        queue_message = overlay._push
-
-        def new_dictation_starts_first(*args, **kwargs):
-            # Ровно та щель: поколение уже проверено, сообщение ещё не в
-            # очереди, и здесь человек нажимает клавишу заново.
-            overlay.begin_session()
-            queue_message(*args, **kwargs)
-
-        monkeypatch.setattr(overlay, "_push", new_dictation_starts_first)
-
-        with caplog.at_level(logging.DEBUG, logger="whisperfree.overlay"):
-            if say == "ok":
-                overlay.ok("хвост прошлой диктовки", session=stale)
-            else:
-                overlay.error("хвост прошлой ошибки", session=stale)
-            pump(root, 3)
-
-        assert overlay._label.cget("text") == _STYLES["recording"][1]
-        assert overlay._hide_job is None
-        assert visible_y(overlay) != _HIDDEN_Y
-        assert any(
-            record.levelno == logging.DEBUG and "отбросил" in record.getMessage()
-            for record in caplog.records
-        )
-
-    def test_fresh_message_still_reaches_the_plate(self, root):
-        """Обратная сторона: проверка в момент показа не должна глотать своё."""
+    def test_message_gone_stale_between_check_and_show_is_dropped(self, root):
+        # Между проверкой у отправителя и показом в потоке Tk человек успевает
+        # нажать клавишу заново: номер едет в очереди и сверяется ещё раз.
         overlay = Overlay(root, enabled=True)
         current = overlay.begin_session()
         overlay.recording()
-        pump(root, 3)
+        pump(root)
 
-        overlay.error("сеть недоступна", session=current)
-        pump(root, 3)
-        assert overlay._label.cget("text") == "сеть недоступна"
+        overlay._queue.put(("state", "ok", "поздний ответ", 1200, current))
+        overlay.begin_session()  # диктовка началась, пока сообщение лежало в очереди
+        pump(root)
+
+        assert overlay._state == "recording"
 
     def test_begin_session_from_another_thread_is_safe(self, root):
-        import threading
-
         overlay = Overlay(root, enabled=True)
-        seen: list[int] = []
-        lock = threading.Lock()
+        seen = []
 
-        def take() -> None:
-            number = overlay.begin_session()
-            with lock:
-                seen.append(number)
+        def worker():
+            for _ in range(50):
+                seen.append(overlay.begin_session())
 
-        threads = [threading.Thread(target=take) for _ in range(8)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
-
-        # Номера не повторяются — иначе два показа считались бы одним.
-        assert sorted(seen) == list(range(1, 9))
+        threads = [threading.Thread(target=worker) for _ in range(4)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        assert len(set(seen)) == len(seen)
 
 
 class TestHistoryWindow:

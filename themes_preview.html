@@ -1,0 +1,516 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Вариации стиля «Дымчатый Графит» • WhisperFree</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --glass-tint: rgba(30, 41, 59, 0.14);
+      --glass-border: rgba(71, 85, 105, 0.75);
+      --glass-text: #0F172A;
+      --accent-dot: #64748B;
+      --bar-color: #64748B;
+      --glass-shadow: rgba(15, 23, 42, 0.12);
+      --inner-rim: rgba(255, 255, 255, 0.5);
+    }
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #F1F5F9;
+      color: #0F172A;
+      min-height: 100vh;
+      padding: 24px 16px 60px;
+    }
+
+    .container {
+      max-width: 1100px;
+      margin: 0 auto;
+    }
+
+    /* Top control panel */
+    .top-panel {
+      background: #FFFFFF;
+      border: 1px solid #CBD5E1;
+      border-radius: 14px;
+      padding: 20px 24px;
+      margin-bottom: 20px;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.03);
+    }
+    .top-panel h1 {
+      font-size: 20px;
+      font-weight: 700;
+      color: #0F172A;
+      margin-bottom: 4px;
+    }
+    .top-panel p {
+      font-size: 13.5px;
+      color: #64748B;
+      margin-bottom: 14px;
+    }
+
+    .theme-selector {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+      background: #F8FAFC;
+      padding: 12px 14px;
+      border-radius: 12px;
+      border: 1px solid #E2E8F0;
+    }
+    .pill-btn {
+      padding: 7px 15px;
+      border-radius: 18px;
+      border: 1px solid #CBD5E1;
+      background: #FFFFFF;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+    .pill-btn:hover {
+      background: #F1F5F9;
+      transform: translateY(-1px);
+    }
+    .pill-btn.active {
+      background: #0F172A;
+      color: #FFFFFF;
+      border-color: #0F172A;
+      box-shadow: 0 3px 8px rgba(15, 23, 42, 0.2);
+    }
+
+    /* Form simulation on white background */
+    .form-canvas {
+      background: #FFFFFF;
+      border: 1px solid #CBD5E1;
+      border-radius: 14px;
+      padding: 32px 38px;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.04);
+      position: relative;
+      overflow: hidden;
+      min-height: 620px;
+    }
+
+    .form-header {
+      border-bottom: 2px solid #F1F5F9;
+      padding-bottom: 14px;
+      margin-bottom: 22px;
+    }
+    .form-header h2 {
+      font-size: 20px;
+      font-weight: 700;
+      color: #0F172A;
+    }
+    .form-header p {
+      font-size: 13.5px;
+      color: #64748B;
+      margin-top: 4px;
+    }
+
+    .form-row {
+      margin-bottom: 18px;
+    }
+    .form-label {
+      display: block;
+      font-size: 13px;
+      font-weight: 600;
+      color: #334155;
+      margin-bottom: 6px;
+    }
+    .form-input {
+      width: 100%;
+      max-width: 620px;
+      padding: 9px 12px;
+      border: 1px solid #CBD5E1;
+      border-radius: 6px;
+      font-size: 13.5px;
+      color: #0F172A;
+      background: #FFFFFF;
+    }
+
+    .test-text-block {
+      max-width: 820px;
+      background: #F8FAFC;
+      border: 1px dashed #CBD5E1;
+      border-radius: 8px;
+      padding: 16px;
+      margin-top: 16px;
+      font-size: 13.5px;
+      line-height: 1.6;
+      color: #1E293B;
+    }
+
+    /* THE COMPACT FLOATING PILL (185x36) */
+    .floating-glass-pill {
+      position: absolute;
+      top: 150px;
+      left: 320px;
+      width: 185px;  /* Компактный размер */
+      height: 36px;  /* Аккуратная высота 36px */
+      border-radius: 18px; /* Полная капсула / овал */
+      padding: 0 14px;
+      display: flex;
+      align-items: center;
+      cursor: grab;
+      user-select: none;
+      z-index: 999;
+      
+      background: var(--glass-tint);
+      border: 1.5px solid var(--glass-border);
+      box-shadow: 0 6px 16px var(--glass-shadow), 
+                  inset 0 1px 1px var(--inner-rim);
+      transition: box-shadow 0.15s, border-color 0.2s, background 0.2s;
+    }
+    .floating-glass-pill:active {
+      cursor: grabbing;
+      box-shadow: 0 10px 24px var(--glass-shadow);
+    }
+
+    .drag-hint {
+      position: absolute;
+      top: -22px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: #0F172A;
+      color: #F8FAFC;
+      font-size: 9.5px;
+      font-weight: 600;
+      padding: 2px 7px;
+      border-radius: 8px;
+      white-space: nowrap;
+      pointer-events: none;
+      box-shadow: 0 2px 6px rgba(0, 0, 0, 0.15);
+    }
+
+    .pill-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--accent-dot);
+      box-shadow: 0 0 8px var(--accent-dot);
+      margin-right: 10px;
+      flex-shrink: 0;
+      position: relative;
+    }
+    .pill-dot::after {
+      content: '';
+      position: absolute;
+      top: -2.5px;
+      left: -2.5px;
+      right: -2.5px;
+      bottom: -2.5px;
+      border-radius: 50%;
+      background: inherit;
+      opacity: 0.5;
+      animation: ripple 1.6s infinite ease-out;
+    }
+    @keyframes ripple {
+      0% { transform: scale(1); opacity: 0.7; }
+      100% { transform: scale(2.2); opacity: 0; }
+    }
+
+    .pill-text {
+      color: var(--glass-text);
+      font-size: 13px;
+      font-weight: 600;
+      letter-spacing: 0.01em;
+      white-space: nowrap;
+      flex-grow: 1;
+    }
+
+    .pill-level {
+      position: absolute;
+      bottom: 0;
+      left: 14px;
+      right: 14px;
+      height: 2.5px;
+      border-radius: 2px;
+      background: rgba(0, 0, 0, 0.08);
+      overflow: hidden;
+    }
+    .pill-level-fill {
+      width: 65%;
+      height: 100%;
+      background: var(--bar-color);
+      border-radius: 2px;
+      animation: levelMove 2s ease-in-out infinite alternate;
+    }
+    @keyframes levelMove {
+      0% { width: 30%; }
+      50% { width: 85%; }
+      100% { width: 55%; }
+    }
+
+    /* Cards Grid of Descriptions */
+    .variants-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+      gap: 16px;
+      margin-top: 24px;
+    }
+    .v-card {
+      background: #FFFFFF;
+      border: 1px solid #E2E8F0;
+      border-radius: 12px;
+      padding: 18px;
+      box-shadow: 0 3px 10px rgba(0, 0, 0, 0.02);
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+    }
+    .v-card h3 {
+      font-size: 14.5px;
+      font-weight: 700;
+      margin-bottom: 6px;
+      color: #0F172A;
+    }
+    .v-card p {
+      font-size: 12.5px;
+      color: #64748B;
+      line-height: 1.4;
+      margin-bottom: 14px;
+    }
+    .v-card button {
+      align-self: flex-start;
+      padding: 6px 12px;
+      border-radius: 14px;
+      border: 1px solid #CBD5E1;
+      background: #F8FAFC;
+      font-size: 11.5px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+    .v-card button:hover {
+      background: #0F172A;
+      color: #FFFFFF;
+      border-color: #0F172A;
+    }
+  </style>
+</head>
+<body>
+
+  <div class="container">
+
+    <div class="top-panel">
+      <h1>6 Вариаций стиля «Дымчатый Графит» (185 × 36 px)</h1>
+      <p>Кликайте по кнопкам ниже и <strong>перетаскивайте плашку мышью по тексту анкеты</strong>, чтобы примерить разные оттенки контура и огонька:</p>
+
+      <div class="theme-selector">
+        <button class="pill-btn active" onclick="setGraphiteTheme('slate')">1. Холодный Сланец (как на вашем скриншоте)</button>
+        <button class="pill-btn" onclick="setGraphiteTheme('warm_taupe')">2. Тёплый Дымчатый Мокко (уютный графит)</button>
+        <button class="pill-btn" onclick="setGraphiteTheme('coral_accent')">3. Графит + Коралловая точка (алый огонёк)</button>
+        <button class="pill-btn" onclick="setGraphiteTheme('titanium')">4. Титановый Графит со светлой гранью</button>
+        <button class="pill-btn" onclick="setGraphiteTheme('amber_accent')">5. Тёплый Графит + Янтарный огонёк</button>
+        <button class="pill-btn" onclick="setGraphiteTheme('minimal')">6. Студийный Минимал 1px</button>
+      </div>
+    </div>
+
+    <!-- The realistic white form container -->
+    <div class="form-canvas" id="canvas">
+
+      <!-- THE COMPACT DRAGGABLE PILL (185x36) -->
+      <div class="floating-glass-pill" id="draggablePill">
+        <div class="drag-hint">Перетащите по тексту</div>
+        <div class="pill-dot"></div>
+        <div class="pill-text">Запись…</div>
+        <div class="pill-level">
+          <div class="pill-level-fill"></div>
+        </div>
+      </div>
+
+      <div class="form-header">
+        <h2>Заявление на предоставление доступа к корпоративной CRM-системе</h2>
+        <p>Интерфейс текстового документа со стандартными полями ввода WhisperFree</p>
+      </div>
+
+      <div class="form-row">
+        <label class="form-label">Тема служебной записки / Название проекта:</label>
+        <input type="text" class="form-input" value="Согласование утвержденного стиля оверлея «Дымчатый Графит»">
+      </div>
+
+      <div class="form-row">
+        <label class="form-label">ФИО инициатора и департамент:</label>
+        <input type="text" class="form-input" value="Иванов Максим Сергеевич — Департамент аналитики">
+      </div>
+
+      <div class="form-row">
+        <label class="form-label">Подробное обоснование необходимости:</label>
+        <div class="test-text-block">
+          Стиль <strong>«Дымчатый Графит»</strong> идеально подходит под белые окна благодаря нейтральному благородному цвету. 
+          Он не выглядит как чужеродное цветное пятно, не напрягает глаза и гармонирует со стандартным черным текстом документа.
+          Размер <strong>185 × 36 px</strong> оставляет весь документ открытым, а прозрачность 12–14% позволяет свободно читать строки прямо под плашкой.
+        </div>
+      </div>
+
+    </div>
+
+    <!-- Cards with descriptions -->
+    <div class="variants-grid">
+      <div class="v-card">
+        <h3>1. Холодный Сланец / Slate</h3>
+        <p>Тот самый вариант с вашего скриншота: строгий серый кант, нейтральная графитовая точка, идеальная гармония со стандартным черным текстом.</p>
+        <button onclick="setGraphiteTheme('slate')">Выбрать этот</button>
+      </div>
+
+      <div class="v-card">
+        <h3>2. Тёплый Дымчатый Мокко (Warm Taupe)</h3>
+        <p>Чуть более тёплый кофейно-графитовый оттенок (taupe). Мягкий кант цвета тёмного шоколада, снимающий усталость с глаз.</p>
+        <button onclick="setGraphiteTheme('warm_taupe')">Выбрать этот</button>
+      </div>
+
+      <div class="v-card">
+        <h3>3. Графит + Коралловая точка</h3>
+        <p>Нейтральный дымчато-графитовый корпус, но точка записи — деликатный алый огонек. Боковым зрением сразу понятно, что запись идёт.</p>
+        <button onclick="setGraphiteTheme('coral_accent')">Выбрать этот</button>
+      </div>
+
+      <div class="v-card">
+        <h3>4. Титановый Графит со светлой гранью</h3>
+        <p>Дымчатый графит со светлым сатиновым кантом (эффект полированной титановой рамки вокруг стекла).</p>
+        <button onclick="setGraphiteTheme('titanium')">Выбрать этот</button>
+      </div>
+
+      <div class="v-card">
+        <h3>5. Тёплый Графит + Янтарный огонёк</h3>
+        <p>Тёплый графит с золотисто-янтарной полоской уровня звука и точкой записи. Ламповый уютный вид.</p>
+        <button onclick="setGraphiteTheme('amber_accent')">Выбрать этот</button>
+      </div>
+
+      <div class="v-card">
+        <h3>6. Студийный Минимал 1px</h3>
+        <p>Предельно лаконичный тонкий 1px кант, минимальное затемнение 10%, строгий антрацит.</p>
+        <button onclick="setGraphiteTheme('minimal')">Выбрать этот</button>
+      </div>
+    </div>
+
+  </div>
+
+  <script>
+    const root = document.documentElement;
+    const pill = document.getElementById("draggablePill");
+    const canvas = document.getElementById("canvas");
+
+    const graphiteThemes = {
+      slate: {
+        tint: "rgba(30, 41, 59, 0.13)",
+        border: "rgba(71, 85, 105, 0.75)",
+        text: "#0F172A",
+        dot: "#64748B",
+        bar: "#64748B",
+        shadow: "rgba(15, 23, 42, 0.12)",
+        innerRim: "rgba(255, 255, 255, 0.5)"
+      },
+      warm_taupe: {
+        tint: "rgba(48, 40, 36, 0.13)",
+        border: "rgba(95, 83, 78, 0.75)",
+        text: "#1C1917",
+        dot: "#78716C",
+        bar: "#78716C",
+        shadow: "rgba(28, 25, 23, 0.12)",
+        innerRim: "rgba(255, 255, 255, 0.45)"
+      },
+      coral_accent: {
+        tint: "rgba(30, 41, 59, 0.12)",
+        border: "rgba(71, 85, 105, 0.75)",
+        text: "#0F172A",
+        dot: "#EF4444",
+        bar: "#EF4444",
+        shadow: "rgba(239, 68, 68, 0.15)",
+        innerRim: "rgba(255, 255, 255, 0.5)"
+      },
+      titanium: {
+        tint: "rgba(24, 32, 45, 0.14)",
+        border: "rgba(255, 255, 255, 0.95)",
+        text: "#0F172A",
+        dot: "#475569",
+        bar: "#475569",
+        shadow: "rgba(15, 23, 42, 0.15)",
+        innerRim: "rgba(255, 255, 255, 0.8)"
+      },
+      amber_accent: {
+        tint: "rgba(42, 36, 32, 0.13)",
+        border: "rgba(95, 83, 78, 0.75)",
+        text: "#1C1917",
+        dot: "#D97706",
+        bar: "#D97706",
+        shadow: "rgba(217, 119, 6, 0.15)",
+        innerRim: "rgba(255, 255, 255, 0.45)"
+      },
+      minimal: {
+        tint: "rgba(15, 23, 42, 0.09)",
+        border: "rgba(100, 116, 139, 0.50)",
+        text: "#0F172A",
+        dot: "#334155",
+        bar: "#334155",
+        shadow: "rgba(15, 23, 42, 0.08)",
+        innerRim: "transparent"
+      }
+    };
+
+    function setGraphiteTheme(key) {
+      const t = graphiteThemes[key];
+      root.style.setProperty('--glass-tint', t.tint);
+      root.style.setProperty('--glass-border', t.border);
+      root.style.setProperty('--glass-text', t.text);
+      root.style.setProperty('--accent-dot', t.dot);
+      root.style.setProperty('--bar-color', t.bar);
+      root.style.setProperty('--glass-shadow', t.shadow);
+      root.style.setProperty('--inner-rim', t.innerRim);
+
+      document.querySelectorAll('.pill-btn').forEach(b => {
+        b.classList.toggle('active', b.getAttribute('onclick').includes(key));
+      });
+    }
+
+    // Draggable
+    let isDragging = false;
+    let startX, startY, initialLeft, initialTop;
+
+    pill.addEventListener('mousedown', (e) => {
+      isDragging = true;
+      startX = e.clientX;
+      startY = e.clientY;
+      initialLeft = pill.offsetLeft;
+      initialTop = pill.offsetTop;
+      document.body.style.cursor = 'grabbing';
+      e.preventDefault();
+    });
+
+    document.addEventListener('mousemove', (e) => {
+      if (!isDragging) return;
+      const dx = e.clientX - startX;
+      const dy = e.clientY - startY;
+
+      let newLeft = initialLeft + dx;
+      let newTop = initialTop + dy;
+
+      const maxLeft = canvas.clientWidth - pill.offsetWidth - 20;
+      const maxTop = canvas.clientHeight - pill.offsetHeight - 20;
+
+      newLeft = Math.max(20, Math.min(newLeft, maxLeft));
+      newTop = Math.max(20, Math.min(newTop, maxTop));
+
+      pill.style.left = newLeft + 'px';
+      pill.style.top = newTop + 'px';
+    });
+
+    document.addEventListener('mouseup', () => {
+      if (isDragging) {
+        isDragging = false;
+        document.body.style.cursor = 'default';
+      }
+    });
+
+    setGraphiteTheme('slate');
+  </script>
+</body>
+</html>

@@ -22,7 +22,7 @@ from whisperfree import audio as audio_mod
 from whisperfree import config as config_mod
 from whisperfree.config import DEFAULT_CONFIG_TOML, parse_config
 from whisperfree.history import History, Record
-from whisperfree.overlay import _STYLES, Overlay
+from whisperfree.overlay import Overlay
 from whisperfree.providers import TranscriptionError
 
 
@@ -588,8 +588,12 @@ def pump(root: tk.Tk, times: int = 4) -> None:
 
 
 def plate(overlay: Overlay) -> str:
-    """Что написано на плашке прямо сейчас — то, что видит человек."""
-    return overlay._label.cget("text")
+    """Что написано на плашке прямо сейчас — то, что видит человек.
+
+    Плашка рисуется картинкой, а не виджетом, поэтому подпись берётся из
+    того же поля, из которого её берёт и отрисовка.
+    """
+    return overlay._text
 
 
 def wait_for(predicate, timeout: float = 2.0) -> bool:
@@ -853,12 +857,12 @@ class TestThePlateBelongsToTheCurrentDictation:
         job = self.dictate(app)  # первая диктовка ушла в работу
         self.press(app)  # человек нажал снова, не дождавшись
         pump(app.root)
-        assert plate(app.overlay) == _STYLES["recording"][1]
+        assert plate(app.overlay) == app.overlay.theme.state("recording").label
 
         app._run_job(job)  # и только теперь прошлая доложила «Готово»
         pump(app.root)
 
-        assert plate(app.overlay) == _STYLES["recording"][1]
+        assert plate(app.overlay) == app.overlay.theme.state("recording").label
         # Авто-скрытие от чужого «Готово» погасило бы плашку через 1.2 с
         # посреди новой записи — этого тоже быть не должно.
         assert app.overlay._hide_job is None

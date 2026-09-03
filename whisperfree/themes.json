@@ -1,0 +1,174 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "version": "4.0.0",
+  "default_theme": "graphite_slate",
+  "geometry": {
+    "width": 185,
+    "height": 36,
+    "corner_radius": 18,
+    "shape": "pill",
+    "padding_x": 14,
+    "padding_y": 6,
+    "border_width": 1.5,
+    "indicator_dot_size": 8,
+    "level_bar_height": 2.5
+  },
+  "themes": {
+    "graphite_slate": {
+      "id": "graphite_slate",
+      "name_ru": "Холодный Сланец (как на вашем скриншоте)",
+      "description": "Строгий холодный серый кант, нейтральная графитовая точка, идеальная гармония с черным шрифтом документов.",
+      "surface": {
+        "background_rgba": "rgba(30, 41, 59, 0.13)",
+        "alpha": 0.13,
+        "backdrop_blur_px": 0,
+        "border_rgba": "rgba(71, 85, 105, 0.75)",
+        "shadow_rgba": "rgba(15, 23, 42, 0.12)"
+      },
+      "typography": {
+        "font_family": "Segoe UI Variable Text, Inter, sans-serif",
+        "font_size": 13,
+        "font_weight": "SemiBold",
+        "text_primary": "#0F172A"
+      },
+      "states": {
+        "recording": { "label": "Запись…", "color": "#64748B", "glow_rgba": "rgba(100, 116, 139, 0.35)" },
+        "silent":    { "label": "Микрофон молчит", "color": "#94A3B8", "glow_rgba": "rgba(148, 163, 184, 0.30)" },
+        "sending":   { "label": "Распознаю…", "color": "#D97706", "glow_rgba": "rgba(217, 119, 6, 0.40)" },
+        "refining":  { "label": "Правлю текст…", "color": "#475569", "glow_rgba": "rgba(71, 85, 105, 0.40)" },
+        "ok":        { "label": "Готово", "color": "#16A34A", "glow_rgba": "rgba(22, 163, 74, 0.45)" },
+        "error":     { "label": "Ошибка", "color": "#DC2626", "glow_rgba": "rgba(220, 38, 38, 0.50)" }
+      }
+    },
+    "graphite_warm_taupe": {
+      "id": "graphite_warm_taupe",
+      "name_ru": "Тёплый Дымчатый Мокко (Уютный графит)",
+      "description": "Теплый кофейно-графитовый оттенок (taupe/мокко), мягкий контур цвета выдержанного темного шоколада.",
+      "surface": {
+        "background_rgba": "rgba(48, 40, 36, 0.13)",
+        "alpha": 0.13,
+        "backdrop_blur_px": 0,
+        "border_rgba": "rgba(95, 83, 78, 0.75)",
+        "shadow_rgba": "rgba(28, 25, 23, 0.12)"
+      },
+      "typography": {
+        "font_family": "Segoe UI Variable Text, Inter, sans-serif",
+        "font_size": 13,
+        "font_weight": "SemiBold",
+        "text_primary": "#1C1917"
+      },
+      "states": {
+        "recording": { "label": "Запись…", "color": "#78716C", "glow_rgba": "rgba(120, 113, 108, 0.35)" },
+        "silent":    { "label": "Микрофон молчит", "color": "#A8A29E", "glow_rgba": "rgba(168, 162, 158, 0.30)" },
+        "sending":   { "label": "Распознаю…", "color": "#D97706", "glow_rgba": "rgba(217, 119, 6, 0.40)" },
+        "refining":  { "label": "Правлю текст…", "color": "#57534E", "glow_rgba": "rgba(87, 83, 78, 0.40)" },
+        "ok":        { "label": "Готово", "color": "#16A34A", "glow_rgba": "rgba(22, 163, 74, 0.45)" },
+        "error":     { "label": "Ошибка", "color": "#DC2626", "glow_rgba": "rgba(220, 38, 38, 0.50)" }
+      }
+    },
+    "graphite_coral_accent": {
+      "id": "graphite_coral_accent",
+      "name_ru": "Графит + Коралловая точка",
+      "description": "Графитовый дымчатый корпус, но точка записи — деликатный кораллово-алый огонёк для моментального считывания боковым зрением.",
+      "surface": {
+        "background_rgba": "rgba(30, 41, 59, 0.12)",
+        "alpha": 0.12,
+        "backdrop_blur_px": 0,
+        "border_rgba": "rgba(71, 85, 105, 0.75)",
+        "shadow_rgba": "rgba(239, 68, 68, 0.15)"
+      },
+      "typography": {
+        "font_family": "Segoe UI Variable Text, Inter, sans-serif",
+        "font_size": 13,
+        "font_weight": "SemiBold",
+        "text_primary": "#0F172A"
+      },
+      "states": {
+        "recording": { "label": "Запись…", "color": "#EF4444", "glow_rgba": "rgba(239, 68, 68, 0.50)" },
+        "silent":    { "label": "Микрофон молчит", "color": "#0284C7", "glow_rgba": "rgba(2, 132, 199, 0.40)" },
+        "sending":   { "label": "Распознаю…", "color": "#D97706", "glow_rgba": "rgba(217, 119, 6, 0.40)" },
+        "refining":  { "label": "Правлю текст…", "color": "#7C3AED", "glow_rgba": "rgba(124, 58, 237, 0.40)" },
+        "ok":        { "label": "Готово", "color": "#16A34A", "glow_rgba": "rgba(22, 163, 74, 0.45)" },
+        "error":     { "label": "Ошибка", "color": "#DC2626", "glow_rgba": "rgba(220, 38, 38, 0.50)" }
+      }
+    },
+    "graphite_titanium": {
+      "id": "graphite_titanium",
+      "name_ru": "Титановый Графит со светлой гранью",
+      "description": "Дымчатый графит со светлым сатиновым кантом (эффект полированной титановой кромки вокруг стекла).",
+      "surface": {
+        "background_rgba": "rgba(24, 32, 45, 0.14)",
+        "alpha": 0.14,
+        "backdrop_blur_px": 0,
+        "border_rgba": "rgba(255, 255, 255, 0.95)",
+        "shadow_rgba": "rgba(15, 23, 42, 0.15)"
+      },
+      "typography": {
+        "font_family": "Segoe UI Variable Text, Inter, sans-serif",
+        "font_size": 13,
+        "font_weight": "SemiBold",
+        "text_primary": "#0F172A"
+      },
+      "states": {
+        "recording": { "label": "Запись…", "color": "#475569", "glow_rgba": "rgba(71, 85, 105, 0.35)" },
+        "silent":    { "label": "Микрофон молчит", "color": "#94A3B8", "glow_rgba": "rgba(148, 163, 184, 0.30)" },
+        "sending":   { "label": "Распознаю…", "color": "#D97706", "glow_rgba": "rgba(217, 119, 6, 0.40)" },
+        "refining":  { "label": "Правлю текст…", "color": "#334155", "glow_rgba": "rgba(51, 65, 85, 0.40)" },
+        "ok":        { "label": "Готово", "color": "#16A34A", "glow_rgba": "rgba(22, 163, 74, 0.45)" },
+        "error":     { "label": "Ошибка", "color": "#DC2626", "glow_rgba": "rgba(220, 38, 38, 0.50)" }
+      }
+    },
+    "graphite_warm_amber": {
+      "id": "graphite_warm_amber",
+      "name_ru": "Тёплый Графит + Янтарный огонёк",
+      "description": "Теплый графит с золотисто-янтарной полоской звука и точкой записи. Ламповый вид.",
+      "surface": {
+        "background_rgba": "rgba(42, 36, 32, 0.13)",
+        "alpha": 0.13,
+        "backdrop_blur_px": 0,
+        "border_rgba": "rgba(95, 83, 78, 0.75)",
+        "shadow_rgba": "rgba(217, 119, 6, 0.15)"
+      },
+      "typography": {
+        "font_family": "Segoe UI Variable Text, Inter, sans-serif",
+        "font_size": 13,
+        "font_weight": "SemiBold",
+        "text_primary": "#1C1917"
+      },
+      "states": {
+        "recording": { "label": "Запись…", "color": "#D97706", "glow_rgba": "rgba(217, 119, 6, 0.45)" },
+        "silent":    { "label": "Микрофон молчит", "color": "#B45309", "glow_rgba": "rgba(180, 83, 9, 0.35)" },
+        "sending":   { "label": "Распознаю…", "color": "#F59E0B", "glow_rgba": "rgba(245, 158, 11, 0.40)" },
+        "refining":  { "label": "Правлю текст…", "color": "#EA580C", "glow_rgba": "rgba(234, 88, 12, 0.40)" },
+        "ok":        { "label": "Готово", "color": "#16A34A", "glow_rgba": "rgba(22, 163, 74, 0.45)" },
+        "error":     { "label": "Ошибка", "color": "#DC2626", "glow_rgba": "rgba(220, 38, 38, 0.50)" }
+      }
+    },
+    "graphite_minimal_1px": {
+      "id": "graphite_minimal_1px",
+      "name_ru": "Ультратонкий Студийный Минимал 1px",
+      "description": "Предельно лаконичный тонкий 1px контур, минимальный дым 9%, ничего лишнего.",
+      "surface": {
+        "background_rgba": "rgba(15, 23, 42, 0.09)",
+        "alpha": 0.09,
+        "backdrop_blur_px": 0,
+        "border_rgba": "rgba(100, 116, 139, 0.50)",
+        "shadow_rgba": "rgba(15, 23, 42, 0.08)"
+      },
+      "typography": {
+        "font_family": "Segoe UI Variable Text, Inter, sans-serif",
+        "font_size": 13,
+        "font_weight": "SemiBold",
+        "text_primary": "#0F172A"
+      },
+      "states": {
+        "recording": { "label": "Запись…", "color": "#334155", "glow_rgba": "rgba(51, 65, 85, 0.35)" },
+        "silent":    { "label": "Микрофон молчит", "color": "#94A3B8", "glow_rgba": "rgba(148, 163, 184, 0.30)" },
+        "sending":   { "label": "Распознаю…", "color": "#D97706", "glow_rgba": "rgba(217, 119, 6, 0.40)" },
+        "refining":  { "label": "Правлю текст…", "color": "#475569", "glow_rgba": "rgba(71, 85, 105, 0.40)" },
+        "ok":        { "label": "Готово", "color": "#16A34A", "glow_rgba": "rgba(22, 163, 74, 0.45)" },
+        "error":     { "label": "Ошибка", "color": "#DC2626", "glow_rgba": "rgba(220, 38, 38, 0.50)" }
+      }
+    }
+  }
+}

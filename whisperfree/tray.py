@@ -62,6 +62,9 @@ class Tray:
         on_quit: Callable[[], None],
         config_path: Path,
         log_path: Path,
+        themes: dict | None = None,
+        current_theme: Callable[[], str] | None = None,
+        on_theme: Callable[[str], None] | None = None,
     ) -> None:
         self.history = history
         self.provider_cfg = provider_cfg
@@ -73,6 +76,9 @@ class Tray:
         self.on_quit = on_quit
         self.config_path = config_path
         self.log_path = log_path
+        self.themes = themes or {}
+        self.current_theme = current_theme or (lambda: "")
+        self.on_theme = on_theme
         self._icon: pystray.Icon | None = None
         self._thread: threading.Thread | None = None
 
@@ -121,6 +127,36 @@ class Tray:
 
         return action
 
+    def _theme_items(self) -> list[pystray.MenuItem]:
+        """Пункты выбора оформления плашки.
+
+        Радиокнопками, а не галочками: оформление всегда ровно одно, и
+        галочки рядом со всеми пунктами обещали бы возможность включить два.
+        """
+        if not self.themes or self.on_theme is None:
+            return [pystray.MenuItem("(нет тем)", None, enabled=False)]
+        items = []
+        for theme_id, theme in self.themes.items():
+            items.append(
+                pystray.MenuItem(
+                    theme.name,
+                    self._theme_action(theme_id),
+                    checked=self._theme_checked(theme_id),
+                    radio=True,
+                )
+            )
+        return items
+
+    def _theme_action(self, theme_id: str) -> Callable[..., None]:
+        def action(_icon=None, _item=None) -> None:
+            if self.on_theme is not None:
+                self.on_theme(theme_id)
+
+        return action
+
+    def _theme_checked(self, theme_id: str) -> Callable[..., bool]:
+        return lambda _item: self.current_theme() == theme_id
+
     def _build_menu(self) -> pystray.Menu:
         return pystray.Menu(
             pystray.MenuItem(
@@ -131,6 +167,7 @@ class Tray:
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Последние расшифровки", pystray.Menu(*self._history_items())),
             pystray.MenuItem("Окно истории…", lambda _icon, _item: self.on_open_history()),
+            pystray.MenuItem("Вид плашки", pystray.Menu(*self._theme_items())),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem(lambda _item: self._usage_text(), None, enabled=False),
             pystray.MenuItem(lambda _item: self._breakdown_text(), None, enabled=False),
