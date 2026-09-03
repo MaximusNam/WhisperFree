@@ -95,6 +95,7 @@ shows both what the headers carry and your own measured spend per dictation.
 - [Keys](#keys)
 - [When the paste does not land](#when-the-paste-does-not-land)
 - [Mixed-language dictation](#mixed-language-dictation)
+- [The history and lexicon windows](#the-history-and-lexicon-windows)
 - [It learns from your corrections](#it-learns-from-your-corrections)
 - [Model-based text refinement](#model-based-text-refinement)
 - [What it costs](#what-it-costs)
@@ -223,6 +224,7 @@ see with your own eyes.
 | **Ctrl+Alt+V** | Paste the last transcript again |
 | **Ctrl+Alt+H** | Open the history window |
 | **Ctrl+Alt+U** | Learn a correction: select the fixed text and press |
+| **Ctrl+wheel** | In an open window — bigger or smaller text. Ctrl+plus, Ctrl+minus and the «А−» «А+» buttons do the same; Ctrl+0 restores the default |
 
 Right Ctrl was picked because almost nobody uses it, and `Ctrl+Win` is already
 taken by Wispr Flow. Change it in `[hotkeys]`.
@@ -321,6 +323,28 @@ dictate_alt = "scroll_lock"
 
 `scroll_lock`, `pause` or `f13`..`f24` are the good candidates: nothing else
 claims them.
+
+---
+
+## The history and lexicon windows
+
+Both windows list records as blocks: a dimmed line of circumstances on top
+(time and target application in the history; who got it wrong and how the
+correction applies in the lexicon), and below it the text itself, which **wraps
+onto multiple lines** and reflows when you resize the window. They used to be
+tables, and a long transcript ran off the right edge — the only way to read it
+was to scroll sideways. The widget had to be replaced outright: `ttk.Treeview`
+can neither wrap text nor hold rows of differing height, and no setting fixes that.
+
+The font size is shared by both windows. The Windows default is Segoe UI 9;
+here it is 13. It is easiest to change inside the window: the «А−» and «А+»
+buttons, Ctrl+wheel, Ctrl+plus and Ctrl+minus, with Ctrl+0 to restore the
+default. Your choice is written back to `[ui].font_size`, so you set it once.
+
+Click to select a record; double-click pastes it (history) or forgets it
+(lexicon); the up and down arrows walk the list and Enter does what a
+double-click does. Text in the window can be selected with the mouse and copied
+with the usual Ctrl+C — the list simply refuses to be edited.
 
 ---
 
@@ -554,6 +578,7 @@ opened from the tray.
 | `[lexicon].enabled` | Learn from your corrections via Ctrl+Alt+U |
 | `[lexicon].rules` | Turn learning into replacements. `false` keeps recogniser hints only |
 | `[lexicon].min_hits_for_rule` | How many times the same fix is needed before a replacement appears |
+| `[ui].font_size` | Font size in the windows. The system default is 9, here it is 13. Easier to change inside the window — the program writes your choice back here |
 
 ---
 
@@ -688,6 +713,8 @@ whisperfree/
   postprocess.py     replacement dictionary, hallucination filtering on silence
   lexicon.py         learning from corrections: sound-based comparison,
                      what may and may not be remembered
+  blocklist.py       record list with word wrapping
+  uifont.py          font size across all windows
   history.py         transcript log and re-pasting
   overlay.py         status bar on top of every window
   tray.py            icon, menu, spend counter

@@ -34,3 +34,19 @@ def root(tk_root):
             child.destroy()
         except tk.TclError:
             pass
+
+
+@pytest.fixture(autouse=True)
+def keep_font_size(tk_root):
+    """Возвращает размер шрифта после каждого теста.
+
+    Именованные шрифты Tk общие на весь интерпретатор, а корень здесь один на
+    весь прогон. Тест, поднявший размер и не убравший его за собой, менял бы
+    его всем следующим — и падал бы не он, а они, через полминуты и в другом
+    файле.
+    """
+    from whisperfree import uifont
+
+    was = uifont.current_size(tk_root)
+    yield
+    uifont.apply_size(tk_root, was)

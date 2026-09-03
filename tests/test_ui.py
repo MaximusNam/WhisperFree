@@ -619,6 +619,321 @@ class TestOverlaySession:
         assert len(set(seen)) == len(seen)
 
 
+class Click:
+    """Щелчок мышью: обработчику от события нужны только координаты."""
+
+    def __init__(self, x: int, y: int) -> None:
+        self.x, self.y = x, y
+
+
+def click_block(listing, index: int) -> None:
+    """Щёлкнуть по записи списка так, как это сделал бы человек.
+
+    Через настоящие координаты, а не через выбор напрямую: именно перевод
+    точки в номер записи и есть то, что заменило собой ttk.Treeview, — и
+    ломаться будет он.
+    """
+    box = listing.text.bbox(f"blk{index}.first")
+    assert box is not None, f"запись {index} не отображена, координат нет"
+    listing._click(Click(box[0] + 3, box[1] + 3))
+
+
+def shown_text(listing) -> str:
+    return listing.text.get("1.0", "end-1c")
+
+
+def block_lines(listing, index: int) -> int:
+    """Сколько строк ЭКРАНА занимает запись — то есть виден ли перенос."""
+    return int(
+        listing.text.count(f"blk{index}.first", f"blk{index}.last", "displaylines")[0]
+    )
+
+
+def hidden_controls(window) -> list[str]:
+    """Подписи и кнопки, которых в окне не видно.
+
+    Сдавленная разметка выглядит для человека точно так же, как обрезанный
+    шрифт, и находится только по тому, что видно: winfo_ismapped и высота.
+    Проверка не декоративная — при размере по умолчанию 13 кнопок «Вставить»
+    и «Копировать» не было видно вовсе, потому что tk.Text просит по
+    умолчанию 24 строки высоты и съедал окно целиком.
+    """
+    missing = []
+
+    def walk(widget):
+        for child in widget.winfo_children():
+            if child.winfo_class() in ("TButton", "TLabel", "TEntry"):
+                try:
+                    label = str(child.cget("text"))[:16]
+                except tk.TclError:  # pragma: no cover
+                    label = ""
+                if not child.winfo_ismapped() or child.winfo_height() < 4:
+                    missing.append(label or child.winfo_class())
+            walk(child)
+
+    walk(window)
+    return missing
+
+
+class TestBlockList:
+    """Список, заменивший таблицу: перенос текста и выбор записи."""
+
+    @pytest.fixture
+    def listing(self, root):
+        from whisperfree.blocklist import Block, BlockList
+
+        win = tk.Toplevel(root)
+        # Окно уводится за пределы экрана, но отображается по-настоящему:
+        # без этого Tk не знает геометрии, а перенос и попадание щелчка
+        # проверить без неё нельзя.
+        win.geometry("620x400+4000+4000")
+        win.deiconify()
+        self.activated, self.selected = [], []
+        lst = BlockList(win, on_activate=self.activated.append, on_select=self.selected.append)
+        lst.tone("failed", foreground="#c0392b")
+        lst.frame.pack(fill="both", expand=True)
+        lst.set_blocks([
+            Block(
+                head="03.09 18:12:17   claude.exe",
+                body="Расшифровка настолько длинная, что в одну строку окна она "
+                "никак не поместится и обязана перенестись на несколько строк, "
+                "а не уехать за правый край, как было в таблице.",
+            ),
+            Block(head="03.09 18:06:11   Viber.exe", body="Короткая запись."),
+            Block(head="03.09 18:02:01   —", body="[тишина]", tone="failed"),
+        ])
+        win.update()
+        yield lst
+
+    def test_long_text_wraps_instead_of_running_off(self, listing):
+        # Ровно то, о чём была просьба: текст переносится, а не улетает вправо.
+        assert block_lines(listing, 0) > 1
+        assert block_lines(listing, 1) == 2  # заголовок и одна строка текста
+
+    def test_wrapping_follows_the_window_width(self, listing):
+        top = listing.frame.winfo_toplevel()
+        before = block_lines(listing, 0)
+        top.geometry("380x400+4000+4000")
+        top.update_idletasks()
+        top.update()
+        assert block_lines(listing, 0) > before, "окно сузили, а строк не прибыло"
+
+    def test_widening_past_the_measure_does_not_lengthen_the_lines(self, listing):
+        """Продолжение того же правила с другой стороны: расширяя окно, строку
+        удлинять больше нельзя — за 80 знаками глаз теряет начало следующей."""
+        top = listing.frame.winfo_toplevel()
+        top.geometry("1000x400+4000+4000")
+        top.update_idletasks()
+        top.update()
+        capped = block_lines(listing, 0)
+        top.geometry("2200x400+4000+4000")
+        top.update_idletasks()
+        top.update()
+        assert block_lines(listing, 0) == capped
+
+    def test_click_picks_the_record_under_the_pointer(self, listing):
+        for index in range(3):
+            click_block(listing, index)
+            assert listing.chosen == index
+        assert self.selected == [0, 1, 2]
+
+    def test_click_on_empty_space_keeps_the_choice(self, listing):
+        click_block(listing, 1)
+        listing._click(Click(300, 395))
+        # Промах на пиксель не должен отнимать выбор вместе с кнопками
+        # «Вставить» и «Копировать».
+        assert listing.chosen == 1
+
+    def test_double_click_activates(self, listing):
+        box = listing.text.bbox("blk2.first")
+        listing._double(Click(box[0] + 3, box[1] + 3))
+        assert self.activated == [2]
+
+    def test_arrows_walk_the_list_and_stop_at_the_edges(self, listing):
+        listing.choose(0, notify=False)
+        listing._step(-1)
+        assert listing.chosen == 0, "вверх от первой записи ушли за край"
+        listing._step(1)
+        listing._step(1)
+        listing._step(1)
+        assert listing.chosen == 2, "вниз от последней записи ушли за край"
+
+    def test_the_chosen_record_is_highlighted_and_the_previous_is_not(self, listing):
+        listing.choose(1, notify=False)
+        assert "chosen" in listing.text.tag_names("blk1.first")
+        listing.choose(2, notify=False)
+        assert "chosen" not in listing.text.tag_names("blk1.first")
+        assert "chosen" in listing.text.tag_names("blk2.first")
+
+    def test_tone_colours_the_body(self, listing):
+        assert "failed" in listing.text.tag_names("blk2.last-2c")
+
+    def test_redraw_is_not_swallowed_by_the_read_only_state(self, listing):
+        """Tk при state="disabled" молча игнорирует insert и delete — ни
+        ошибки, ни изменения. Забыв снять состояние, получишь пустой список
+        без единого признака поломки, поэтому проверка прямая."""
+        from whisperfree.blocklist import Block
+
+        assert listing.text.cget("state") == "disabled"
+        listing.set_blocks([Block(head="голова", body="тело")])
+        assert "тело" in shown_text(listing)
+        assert listing.text.cget("state") == "disabled", "список остался редактируемым"
+
+    def test_choice_survives_a_redraw_when_asked(self, listing):
+        from whisperfree.blocklist import Block
+
+        listing.set_blocks([Block(head="a", body="b"), Block(head="c", body="d")], keep=1)
+        assert listing.chosen == 1
+
+    def test_a_choice_out_of_range_is_dropped(self, listing):
+        from whisperfree.blocklist import Block
+
+        listing.set_blocks([Block(head="a", body="b")], keep=99)
+        assert listing.chosen is None
+
+    def test_an_empty_list_survives_keys(self, listing):
+        listing.set_blocks([])
+        listing._step(1)
+        listing._step(-1)
+        assert listing.chosen is None
+        assert listing.count == 0
+
+    def test_the_scrollbar_does_not_lie_on_top_of_the_text(self, listing):
+        # В прежнем коде полоса создавалась дочерней к самому списку и
+        # упаковывалась внутрь него, закрывая правый край текста.
+        assert listing.text.winfo_children() == []
+        classes = [w.winfo_class() for w in listing.frame.winfo_children()]
+        assert "TScrollbar" in classes
+
+    def test_the_selection_stays_visible_when_focus_leaves(self, listing):
+        """По умолчанию inactiveselectbackground в Tk ПУСТОЙ. Человек выделяет
+        текст, жмёт «Копировать», фокус уходит на кнопку — и выделение
+        становится невидимым: он больше не видит, что скопируется."""
+        assert str(listing.text.cget("inactiveselectbackground")).strip()
+
+    def test_mouse_selection_shows_above_the_chosen_highlight(self, listing):
+        # Тег sel создан Tk раньше наших и потому ниже по приоритету: без
+        # подъёма фон выбранной записи закрасил бы выделение мышью.
+        names = list(listing.text.tag_names())
+        assert names.index("sel") > names.index("chosen")
+
+    def test_the_line_is_capped_at_a_readable_measure(self, listing):
+        """Перенос по ширине окна сам по себе беды не лечит: на широком
+        мониторе строка разрастается до двух сотен знаков."""
+        top = listing.frame.winfo_toplevel()
+        top.geometry("2000x400+4000+4000")
+        top.update_idletasks()
+        top.update()
+        margin = int(listing.text.tag_cget("body", "rmargin"))
+        assert margin > 0, "на широком окне мера строки не ограничена"
+
+    def test_a_narrow_window_does_not_get_a_right_margin(self, listing):
+        top = listing.frame.winfo_toplevel()
+        top.geometry("500x400+4000+4000")
+        top.update_idletasks()
+        top.update()
+        assert int(listing.text.tag_cget("body", "rmargin")) == 0
+
+    def test_bigger_font_makes_the_lines_taller(self, listing):
+        from whisperfree import uifont
+
+        before = listing.text.bbox("blk0.first")[3]
+        was = uifont.current_size(listing.text)
+        try:
+            uifont.apply_size(listing.text, 20)
+            listing.apply_font()
+            listing.frame.winfo_toplevel().update()
+            after = listing.text.bbox("blk0.first")[3]
+            assert after > before, f"строка не выросла: {before} -> {after}"
+            # Заголовок держит свой экземпляр шрифта и обязан подтянуться сам.
+            assert listing._head_font.cget("size") == 19
+        finally:
+            uifont.apply_size(listing.text, was)
+            listing.apply_font()
+
+
+class TestFontSize:
+    def test_default_is_bigger_than_the_system_one(self):
+        from whisperfree import uifont
+
+        # Системный на Windows — 9, и он оказался мелок.
+        assert uifont.DEFAULT_SIZE > 9
+
+    def test_size_is_clamped(self):
+        from whisperfree import uifont
+
+        assert uifont.clamp(1000) == uifont.MAX_SIZE
+        assert uifont.clamp(-3) == uifont.MIN_SIZE
+        assert uifont.clamp(14) == 14
+
+    def test_garbage_falls_back_to_the_default(self):
+        from whisperfree import uifont
+
+        assert uifont.clamp("крупнее") == uifont.DEFAULT_SIZE
+        assert uifont.clamp(None) == uifont.DEFAULT_SIZE
+
+    def test_applying_changes_every_named_font(self, root):
+        import tkinter.font as tkfont
+
+        from whisperfree import uifont
+
+        was = uifont.current_size(root)
+        try:
+            uifont.apply_size(root, 17)
+            for name in uifont.NAMED_FONTS:
+                assert tkfont.nametofont(name, root).cget("size") == 17, name
+        finally:
+            uifont.apply_size(root, was)
+
+    def test_the_plate_is_not_affected(self, root):
+        """Плашка живёт в том же процессе Tk, но рисуется картинкой PIL со
+        своим шрифтом. Если бы она брала шрифт Tk, увеличение текста в окнах
+        разъехалось бы с её размерами, заданными макетом."""
+        from whisperfree import uifont
+
+        overlay = Overlay(root, enabled=True)
+        was = uifont.current_size(root)
+        try:
+            plate.clear_cache()
+            before = plate.render(overlay.theme, "recording", "Запись…").size
+            uifont.apply_size(root, 24)
+            plate.clear_cache()
+            after = plate.render(overlay.theme, "recording", "Запись…").size
+            assert before == after
+        finally:
+            uifont.apply_size(root, was)
+            plate.clear_cache()
+
+
+class TestWindowFitsItsFont:
+    def test_minimum_size_grows_with_the_font(self, root):
+        from whisperfree import uifont
+
+        was = uifont.current_size(root)
+        try:
+            uifont.apply_size(root, 9)
+            small = uifont.min_window(root, chars=46, lines=16)
+            uifont.apply_size(root, 24)
+            big = uifont.min_window(root, chars=46, lines=16)
+            # Иначе при крупном кегле кнопки сдавливает менеджер упаковки, и
+            # выглядит это ровно как обрезка шрифтом.
+            assert big[0] > small[0] and big[1] > small[1]
+        finally:
+            uifont.apply_size(root, was)
+
+    def test_minimum_size_never_exceeds_the_screen(self, root):
+        from whisperfree import uifont
+
+        was = uifont.current_size(root)
+        try:
+            uifont.apply_size(root, uifont.MAX_SIZE)
+            width, height = uifont.min_window(root, chars=200, lines=100)
+            assert width < root.winfo_screenwidth()
+            assert height < root.winfo_screenheight()
+        finally:
+            uifont.apply_size(root, was)
+
+
 class TestHistoryWindow:
     @pytest.fixture
     def history(self, tmp_path):
@@ -634,51 +949,128 @@ class TestHistoryWindow:
         )
         return h
 
-    def test_opens_and_lists_records(self, root, history):
-        window = HistoryWindow(root, history, lambda r: None, lambda r: None)
-        window.open()
+    def window(self, root, history, on_paste=None, on_copy=None):
+        win = HistoryWindow(
+            root, history, on_paste or (lambda r: None), on_copy or (lambda r: None)
+        )
+        win.open()
         pump(root)
+        return win
 
-        assert window._tree is not None
-        assert len(window._tree.get_children()) == 2
+    def test_opens_and_lists_records(self, root, history):
+        window = self.window(root, history)
+        assert window._list is not None
+        assert window._list.count == 2
+
+    def test_the_text_of_a_record_is_shown_in_full(self, root, history):
+        window = self.window(root, history)
+        # Ничего не обрезано и не спрятано за правым краем: текст в окне.
+        assert "поставь докер" in shown_text(window._list)
+
+    def test_time_and_target_are_above_the_text(self, root, history):
+        window = self.window(root, history)
+        assert "notepad.exe" in shown_text(window._list)
 
     def test_failed_record_is_marked(self, root, history):
-        window = HistoryWindow(root, history, lambda r: None, lambda r: None)
-        window.open()
-        pump(root)
-
-        first = window._tree.get_children()[0]
-        assert "failed" in window._tree.item(first, "tags")
+        window = self.window(root, history)
+        # Свежая запись сверху, у неё непустой error.
+        assert "failed" in window._list.text.tag_names("blk0.last-2c")
+        assert "нет активного окна" in shown_text(window._list)
 
     def test_search_filters(self, root, history):
-        window = HistoryWindow(root, history, lambda r: None, lambda r: None)
-        window.open()
-        pump(root)
-
+        window = self.window(root, history)
         window._search.set("докер")
         window._refresh()
-        assert len(window._tree.get_children()) == 1
+        assert window._list.count == 1
 
     def test_copy_calls_back_with_the_record(self, root, history):
         copied = []
-        window = HistoryWindow(root, history, lambda r: None, copied.append)
-        window.open()
-        pump(root)
-
-        window._tree.selection_set(window._tree.get_children()[0])
+        window = self.window(root, history, on_copy=copied.append)
+        click_block(window._list, 0)
         window._copy_selected()
         assert copied[0].text == "проверь через Gemini"
 
-    def test_reopening_reuses_the_window(self, root, history):
-        window = HistoryWindow(root, history, lambda r: None, lambda r: None)
-        window.open()
-        pump(root)
-        first = window._window
+    def test_copy_without_a_choice_says_so_instead_of_failing(self, root, history):
+        copied = []
+        window = self.window(root, history, on_copy=copied.append)
+        window._copy_selected()
+        assert copied == []
+        assert "выберите" in window._status.cget("text")
 
+    def test_double_click_pastes(self, root, history):
+        pasted = []
+        window = self.window(root, history, on_paste=pasted.append)
+        box = window._list.text.bbox("blk1.first")
+        window._list._double(Click(box[0] + 3, box[1] + 3))
+        pump(root)
+        # Вставка уходит в отдельный поток через after(220) — ждём её.
+        for _ in range(10):
+            if pasted:
+                break
+            pump(root)
+        assert [r.text for r in pasted] == ["поставь докер"]
+
+    def test_the_choice_survives_a_search_keystroke(self, root, history):
+        window = self.window(root, history)
+        click_block(window._list, 1)
+        chosen = window._selected()
+        window._search.set("докер")
+        window._refresh()
+        assert window._selected() is chosen, "выбранная запись потерялась при поиске"
+
+    def test_every_control_stays_visible_at_any_size(self, root, history):
+        from whisperfree import uifont
+
+        window = self.window(root, history)
+        window._window.geometry("900x560+4000+4000")
+        for size in (uifont.MIN_SIZE, 9, uifont.DEFAULT_SIZE, 20, uifont.MAX_SIZE):
+            uifont.apply_size(root, size)
+            window.apply_font()
+            window._refresh()
+            window._window.update_idletasks()
+            window._window.update()
+            assert hidden_controls(window._window) == [], f"при размере {size}"
+
+    def test_an_empty_search_says_so(self, root, history):
+        window = self.window(root, history)
+        window._search.set("такого там точно нет")
+        pump(root)
+        # Иначе окно с нулём записей выглядит одинаково и когда ничего не
+        # нашлось, и когда программа сломалась.
+        assert "не найдено" in window._status.cget("text")
+
+    def test_typing_in_the_search_filters_without_key_events(self, root, history):
+        # Следим за изменением текста, а не за отпусканием клавиш: иначе
+        # список перестраивался и на стрелках, и на Shift.
+        window = self.window(root, history)
+        window._search.set("докер")
+        pump(root)
+        assert window._list.count == 1
+
+    def test_reopening_reuses_the_window(self, root, history):
+        window = self.window(root, history)
+        first = window._window
         window._close()
         window.open()
         pump(root)
         assert window._window is first
+
+    def test_zoom_asks_the_application(self, root, history):
+        asked = []
+        window = HistoryWindow(
+            root, history, lambda r: None, lambda r: None, on_font=asked.append
+        )
+        window.open()
+        pump(root)
+        window._zoom(1)
+        window._zoom(-1)
+        assert asked == [1, -1]
+
+    def test_apply_font_survives_a_closed_window(self, root, history):
+        window = HistoryWindow(root, history, lambda r: None, lambda r: None)
+        # Окно ещё не открывали: списка нет, но звать можно — размер меняют
+        # из любого окна, а не только из этого.
+        window.apply_font()
 
 
 class TestLexiconWindow:
@@ -707,44 +1099,44 @@ class TestLexiconWindow:
 
     def test_opens_and_lists_lessons(self, root, lex):
         win = self.window(root, lex)
-        assert win._tree is not None
-        assert len(win._tree.get_children()) == 2
+        assert win._list is not None
+        assert win._list.count == 2
+
+    def test_the_pair_is_shown_in_full(self, root, lex):
+        win = self.window(root, lex)
+        assert "редис → Redis" in shown_text(win._list)
+        assert "сожелению → сожалению" in shown_text(win._list)
 
     def test_frequent_lesson_comes_first(self, root, lex):
         win = self.window(root, lex)
-        first = win._tree.get_children()[0]
-        assert win._tree.item(first, "values")[1] == "Redis"
+        assert win._rows[0].right == "Redis"
 
-    def test_model_mistakes_are_marked(self, root, lex):
+    def test_blame_and_application_are_written_in_words(self, root, lex):
         win = self.window(root, lex)
-        first = win._tree.get_children()[0]
-        assert "refine" in win._tree.item(first, "tags")
+        shown = shown_text(win._list)
+        assert "испортила правка моделью" in shown
+        assert "не расслышал микрофон" in shown
+        # Число повторов по-русски, а не «x2».
+        assert "2 раза" in shown
 
-    def test_rule_and_hint_are_shown_differently(self, root, lex):
+    def test_rule_and_hint_are_named_differently(self, root, lex):
         win = self.window(root, lex)
-        rows = {
-            win._tree.item(iid, "values")[1]: win._tree.item(iid, "values")[3]
-            for iid in win._tree.get_children()
-        }
-        assert rows["Redis"] == "замена"
-        # Правкой внутри одного алфавита замена не станет, и обещать её нельзя.
-        assert rows["сожалению"] == "подсказка"
+        shown = shown_text(win._list)
+        assert "замена" in shown
+        assert "подсказка" in shown
 
-    def test_blame_is_written_in_words(self, root, lex):
+    def test_model_mistakes_are_coloured(self, root, lex):
         win = self.window(root, lex)
-        blames = {
-            win._tree.item(iid, "values")[2] for iid in win._tree.get_children()
-        }
-        assert "испортила правка моделью" in blames
+        assert "refine" in win._list.text.tag_names("blk0.last-2c")
 
     def test_forgetting_removes_the_row_and_tells_the_app(self, root, lex):
         called = []
         win = self.window(root, lex, on_change=lambda: called.append(True))
-        win._tree.selection_set(win._tree.get_children()[0])
+        click_block(win._list, 0)
         win._forget_selected()
         pump(root)
 
-        assert len(win._tree.get_children()) == 1
+        assert win._list.count == 1
         # Приложение обязано узнать сразу: иначе выброшенное правило
         # доживёт до перезапуска.
         assert called == [True]
@@ -755,7 +1147,7 @@ class TestLexiconWindow:
         win._forget_all()
         pump(root)
 
-        assert win._tree.get_children() == ()
+        assert win._list.count == 0
         assert lex.lessons == []
         assert called == [True]
 
@@ -763,19 +1155,57 @@ class TestLexiconWindow:
         win = self.window(root, lex)
         win._forget_selected()
         pump(root)
-        assert len(win._tree.get_children()) == 2
+        assert win._list.count == 2
+        assert "выберите" in win._status.cget("text")
 
     def test_reopening_shows_fresh_data(self, root, lex):
         win = self.window(root, lex)
         lex.learn("открыл фигму", "открыл Figma")
         win.open()
         pump(root)
-        assert len(win._tree.get_children()) == 3
+        assert win._list.count == 3
 
-    def test_empty_lexicon_opens_without_rows(self, root, tmp_path):
+    def test_empty_lexicon_says_so(self, root, tmp_path):
         from whisperfree.config import LexiconConfig
         from whisperfree.lexicon import Lexicon
 
         empty = Lexicon(tmp_path / "empty.json", LexiconConfig())
         win = self.window(root, empty)
-        assert win._tree.get_children() == ()
+        assert win._list.count == 0
+        assert "ничего не выучено" in win._status.cget("text")
+
+    def test_the_footnote_wraps_to_the_window(self, root, lex):
+        # Обработчик зовём сами, а не ждём разложения окна: прежний вариант
+        # читал wraplength сразу после открытия и проходил или падал в
+        # зависимости от того, успел ли Tk обработать <Configure>.
+        win = self.window(root, lex)
+        win._wrap_note(600)
+        assert int(win._note.cget("wraplength")) == 592
+        win._wrap_note(50)
+        # Слишком узкое окно не должно давать бессмысленный перенос.
+        assert int(win._note.cget("wraplength")) == 200
+
+    def test_every_control_stays_visible_at_any_size(self, root, lex):
+        from whisperfree import uifont
+
+        win = self.window(root, lex)
+        win._window.geometry("760x540+4000+4000")
+        for size in (uifont.MIN_SIZE, 9, uifont.DEFAULT_SIZE, 20, uifont.MAX_SIZE):
+            uifont.apply_size(root, size)
+            win.apply_font()
+            win._refresh()
+            win._window.update_idletasks()
+            win._window.update()
+            # Кнопки размера — последнее, что можно отнять у человека,
+            # которому мелко: без них он не вернёт себе читаемый текст.
+            assert hidden_controls(win._window) == [], f"при размере {size}"
+
+    def test_zoom_asks_the_application(self, root, lex):
+        from whisperfree.lexicon_window import LexiconWindow
+
+        asked = []
+        win = LexiconWindow(root, lex, on_font=asked.append)
+        win.open()
+        pump(root)
+        win._zoom(1)
+        assert asked == [1]

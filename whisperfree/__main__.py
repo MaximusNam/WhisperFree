@@ -26,6 +26,7 @@ from pathlib import Path
 from . import audio as audio_mod
 from . import autostart, config as config_mod, inject
 from . import lexicon as lexicon_mod
+from . import uifont
 from .history import AudioCache, History, Record
 from .history_window import HistoryWindow
 from .hotkey import HotkeyManager
@@ -135,6 +136,10 @@ class App:
         # одном процессе, и тестам нужен общий.
         self.root = root or tk.Tk()
         self.root.withdraw()
+        # Размер шрифта общий для всех окон и задаётся до их создания: окна
+        # строятся по требованию, и открытое через час должно быть таким же,
+        # как открытое сразу.
+        self.font_size = uifont.apply_size(self.root, cfg.ui.font_size)
         self.themes = load_themes()
         position = None
         if cfg.ui.overlay_x >= 0 and cfg.ui.overlay_y >= 0:
@@ -147,10 +152,17 @@ class App:
             on_move=self._remember_plate_position,
         )
         self.history_window = HistoryWindow(
-            self.root, self.history, self._paste_record, self._copy_record
+            self.root,
+            self.history,
+            self._paste_record,
+            self._copy_record,
+            on_font=self._change_font,
         )
         self.lexicon_window = LexiconWindow(
-            self.root, self.lexicon, on_change=self._apply_lexicon
+            self.root,
+            self.lexicon,
+            on_change=self._apply_lexicon,
+            on_font=self._change_font,
         )
         # Раскладываем выученное по местам сразу: без этого первая диктовка
         # после запуска шла бы без всего, чему программа успела научиться.
@@ -769,6 +781,27 @@ class App:
             return
         self.overlay.set_theme(theme)
         self._remember_ui(theme=theme_id)
+
+    def _change_font(self, delta: int) -> None:
+        """Крупнее, мельче или обратно к значению по умолчанию (delta = 0).
+
+        Размер один на все окна: держать его отдельно для каждого значило бы
+        заставлять человека настраивать одно и то же дважды. Запоминается в
+        конфиге — подбирать размер заново после каждого запуска издевательство,
+        ровно как и с местом плашки.
+        """
+        wanted = uifont.DEFAULT_SIZE if delta == 0 else self.font_size + delta
+        size = uifont.apply_size(self.root, wanted)
+        if size == self.font_size:
+            # Упёрлись в предел. Молчать нельзя: человек жмёт кнопку и ждёт,
+            # что что-то произойдёт.
+            log.info("размер шрифта уже на пределе: %d", size)
+            return
+        self.font_size = size
+        self.history_window.apply_font()
+        self.lexicon_window.apply_font()
+        self._remember_ui(font_size=size)
+        log.info("размер шрифта в окнах: %d", size)
 
     def _remember_plate_position(self, x: int, y: int) -> None:
         """Запомнить, куда человек перетащил плашку."""
