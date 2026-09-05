@@ -70,6 +70,77 @@ class TestSuppression:
         assert manager._suppress_vks == set()
 
 
+class TestComboSuppression:
+    """Клавиша сочетания не должна доходить до приложения — это защита текста.
+
+    Настоящий случай от пользователя: он выделял исправленный текст, жал
+    Ctrl+Alt+U, и в окно уезжала буква «Г», заменяя собой выделенное. Windows
+    считает Ctrl+Alt за AltGr, а на русской раскладке физическая клавиша U —
+    это «Г». Человек нажимал «запомнить правку» и терял абзац.
+    """
+
+    def make(self, spec="ctrl+alt+u", suppress=True):
+        manager = HotkeyManager(suppress=suppress)
+        manager.register_combo(spec, lambda: None)
+        return manager
+
+    def test_the_combo_key_is_registered_for_hiding(self):
+        manager = self.make()
+        # 0x55 — код клавиши U, 0x11 — Ctrl, 0x12 — Alt.
+        assert manager._suppress_combos == [(0x55, (0x11, 0x12))]
+
+    def test_the_key_is_hidden_while_the_modifiers_are_down(self, monkeypatch):
+        manager = self.make()
+        monkeypatch.setattr(hotkey_mod, "key_is_down", lambda vk: True)
+        assert manager._combo_key_held(0x55) is True
+
+    def test_the_bare_letter_still_reaches_the_application(self, monkeypatch):
+        """Самое важное здесь. Подавляя клавишу безусловно, как клавишу
+        диктовки, мы отняли бы у человека саму букву: он перестал бы набирать
+        «у» и «г» вообще."""
+        manager = self.make()
+        monkeypatch.setattr(hotkey_mod, "key_is_down", lambda vk: False)
+        assert manager._combo_key_held(0x55) is False
+
+    def test_one_missing_modifier_is_enough_to_let_the_key_through(self, monkeypatch):
+        manager = self.make()
+        # Ctrl зажат, Alt нет — это не наше сочетание, а Ctrl+U приложения.
+        monkeypatch.setattr(hotkey_mod, "key_is_down", lambda vk: vk == 0x11)
+        assert manager._combo_key_held(0x55) is False
+
+    def test_another_key_is_never_touched(self, monkeypatch):
+        manager = self.make()
+        monkeypatch.setattr(hotkey_mod, "key_is_down", lambda vk: True)
+        assert manager._combo_key_held(0x41) is False  # «A»
+
+    def test_every_default_combo_is_hidden(self):
+        """Пропускать нельзя ни одно: Ctrl+Alt+V и Ctrl+Alt+H на русской
+        раскладке дают «М» и «Р» и портят текст ровно так же."""
+        manager = HotkeyManager(suppress=True)
+        for spec in ("ctrl+alt+v", "ctrl+alt+h", "ctrl+alt+u", "ctrl+alt+l"):
+            manager.register_combo(spec, lambda: None)
+        assert len(manager._suppress_combos) == 4
+
+    def test_suppression_can_be_turned_off(self):
+        manager = self.make(suppress=False)
+        assert manager._suppress_combos == []
+
+    def test_a_single_key_combo_is_not_hidden(self):
+        # Без модификаторов проверить нечего, и подавление съело бы букву.
+        manager = self.make(spec="u")
+        assert manager._suppress_combos == []
+
+    def test_the_filter_is_installed_even_without_a_dictation_key(self):
+        # Раньше фильтр ставился, только если пряталась клавиша диктовки.
+        # У ctrl_r по умолчанию она не прячется — значит фильтра не было
+        # вовсе, и ни одно сочетание не подавлялось.
+        manager = HotkeyManager(suppress=True)
+        manager.register_hold("ctrl_r", lambda: None, lambda: None)
+        manager.register_combo("ctrl+alt+u", lambda: None)
+        assert manager._suppress_vks == set(), "клавиша диктовки и не должна прятаться"
+        assert manager._suppress_combos, "а сочетание — должно"
+
+
 class TestHoldBehaviour:
     def make(self):
         events: list[str] = []

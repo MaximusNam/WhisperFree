@@ -160,7 +160,7 @@ class TestCopySelection:
         clip = FakeClipboard(initial="было в буфере", selection="выделенное").install(
             monkeypatch
         )
-        assert copy_selection() == "выделенное"
+        assert copy_selection() == ("выделенное", "")
 
     def test_previous_clipboard_is_restored(self, monkeypatch):
         clip = FakeClipboard(initial="было в буфере", selection="выделенное").install(
@@ -174,7 +174,9 @@ class TestCopySelection:
         # мы прочитали бы прежнее его содержимое и стали бы учиться на тексте,
         # которого он не выделял.
         clip = FakeClipboard(initial="старый текст", selection=None).install(monkeypatch)
-        assert copy_selection() is None
+        selection, problem = copy_selection()
+        assert selection is None
+        assert "выделите" in problem
         assert clip.content == "старый текст"
 
     def test_selection_equal_to_the_clipboard_is_still_seen(self, monkeypatch):
@@ -183,7 +185,7 @@ class TestCopySelection:
         clip = FakeClipboard(initial="один и тот же", selection="один и тот же").install(
             monkeypatch
         )
-        assert copy_selection() == "один и тот же"
+        assert copy_selection() == ("один и тот же", "")
 
     def test_probe_never_stays_in_the_clipboard(self, monkeypatch):
         clip = FakeClipboard(initial=None, selection=None).install(monkeypatch)
@@ -194,7 +196,7 @@ class TestCopySelection:
         clip = FakeClipboard(
             initial="важное", selection="выделенное", copy_works=False
         ).install(monkeypatch)
-        assert copy_selection() is None
+        assert copy_selection()[0] is None
         assert clip.content == "важное"
 
     def test_no_window_means_no_reading(self, monkeypatch):
@@ -202,7 +204,9 @@ class TestCopySelection:
 
         clip = FakeClipboard(initial="важное", selection="выделенное").install(monkeypatch)
         monkeypatch.setattr(inject_mod, "has_foreground_window", lambda: False)
-        assert copy_selection() is None
+        selection, problem = copy_selection()
+        assert selection is None
+        assert "окна" in problem
         assert clip.content == "важное", "буфер тронули, хотя окна нет"
 
     def test_the_combo_is_passed_through(self, monkeypatch):
@@ -236,6 +240,32 @@ class TestCopySelection:
         )
         copy_selection()
         assert order == ["wait", "copy"]
+
+    def test_a_held_modifier_stops_the_copy_instead_of_sending_a_broken_one(
+        self, monkeypatch
+    ):
+        """Настоящий случай от пользователя: он выделял текст, жал Ctrl+Alt+U и
+        читал «выделите исправленный текст» — при том, что выделил.
+
+        Обработчик запускается по НАЖАТИЮ, то есть когда Ctrl и Alt заведомо
+        зажаты. Раньше результат ожидания не проверялся, и копирование уходило
+        поверх них: окно получало Ctrl+Alt+C, буфер не менялся, а человеку
+        показывали причину, к делу не относящуюся.
+        """
+        from whisperfree import inject as inject_mod
+
+        sent = []
+        clip = FakeClipboard(initial="важное", selection="выделенное").install(monkeypatch)
+        monkeypatch.setattr(
+            inject_mod, "wait_modifiers_released", lambda timeout_ms=400: False
+        )
+        monkeypatch.setattr(inject_mod, "send_combo", lambda spec: sent.append(spec) or True)
+
+        selection, problem = copy_selection()
+        assert selection is None
+        assert "отпустите" in problem.lower(), f"причина не та: {problem!r}"
+        assert sent == [], "копирование ушло поверх зажатых клавиш"
+        assert clip.content == "важное", "буфер тронули, хотя копировать не стали"
 
 
 class TestCopyKeyForApp:

@@ -1593,7 +1593,7 @@ class TestLearningFromCorrections:
         from whisperfree import inject as inject_mod
 
         monkeypatch.setattr(
-            inject_mod, "copy_selection", lambda **kwargs: selection
+            inject_mod, "copy_selection", lambda **kwargs: (selection, "")
         )
         app._learn_now(0)
 

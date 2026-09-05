@@ -1173,16 +1173,18 @@ class App:
 
         # Клавишу копирования берём по приложению-получателю: в терминале
         # Ctrl+C прервал бы запущенную там программу.
-        selection = inject.copy_selection(
+        selection, problem = inject.copy_selection(
             combo=inject.copy_key_for(
                 inject.foreground_exe(),
                 self.cfg.inject.default_paste,
                 self.cfg.inject.paste_overrides,
-            ),
-            wait_modifiers_ms=self.cfg.inject.wait_modifiers_ms,
+            )
         )
         if not selection or not selection.strip():
-            self.overlay.error("выделите исправленный текст", session)
+            # Причину берём от copy_selection: «ничего не выделено» и «вы
+            # держите Ctrl» человеку говорят о разном, а раньше он на оба
+            # случая читал одно и то же и не понимал, что делать.
+            self.overlay.error(problem or "выделите исправленный текст", session)
             return
 
         # Ищем по похожести, а не по времени: правя текст, человек мог сходить

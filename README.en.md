@@ -223,7 +223,7 @@ see with your own eyes.
 | **Right Ctrl** (hold) | Record and paste |
 | **Ctrl+Alt+V** | Paste the last transcript again |
 | **Ctrl+Alt+H** | Open the history window |
-| **Ctrl+Alt+U** | Learn a correction: select the fixed text and press |
+| **Ctrl+Alt+U** | Learn a correction: select the fixed text, press and **release** the keys |
 | **Ctrl+wheel** | In an open window — bigger or smaller text. Ctrl+plus, Ctrl+minus and the «А−» «А+» buttons do the same; Ctrl+0 restores the default |
 
 Right Ctrl was picked because almost nobody uses it, and `Ctrl+Win` is already

@@ -236,6 +236,10 @@ class HotkeyManager:
         self.lost_releases = 0
         self._holds: list[_Hold] = []
         self._combos: list[_Combo] = []
+        # Клавиши сочетаний, которые надо прятать от приложения, вместе с их
+        # модификаторами: (код клавиши, коды модификаторов). Почему нельзя
+        # обойтись множеством кодов, как у клавиши диктовки, — см. _event_filter.
+        self._suppress_combos: list[tuple[int, tuple[int, ...]]] = []
         self._pressed: set[str] = set()
         self._lock = threading.RLock()
         self._listener: keyboard.Listener | None = None
@@ -294,7 +298,25 @@ class HotkeyManager:
         if not names:
             return False
         self._combos.append(_Combo(names=names, callback=callback))
-        log.info("сочетание: %s", spec)
+
+        # Клавишу сочетания надо прятать от приложения под курсором, и это не
+        # удобство, а защита текста. Ctrl+Alt Windows считает за AltGr, поэтому
+        # Ctrl+Alt+U на русской раскладке доходит до окна буквой «Г» — и если в
+        # окне что-то выделено, буква заменяет собой выделенное. Человек
+        # нажимает «запомнить правку» и теряет абзац.
+        suppressed = False
+        if self.suppress and len(names) > 1:
+            main_vk = vk_for(names[-1])
+            mod_vks = tuple(vk_for(n) for n in names[:-1])
+            if main_vk is not None and all(v is not None for v in mod_vks):
+                self._suppress_combos.append((main_vk, mod_vks))
+                suppressed = True
+            else:
+                log.warning(
+                    "сочетание %s не спрятать от приложения: не знаю кодов "
+                    "его клавиш — буква может уйти в текст", spec
+                )
+        log.info("сочетание: %s%s", spec, " (подавляется)" if suppressed else "")
         return True
 
     # --- жизненный цикл --------------------------------------------------------
@@ -316,7 +338,7 @@ class HotkeyManager:
 
     def _build_listener(self) -> None:
         kwargs = {"on_press": self._on_press, "on_release": self._on_release}
-        if self.suppress and self._suppress_vks:
+        if self.suppress and (self._suppress_vks or self._suppress_combos):
             kwargs["win32_event_filter"] = self._event_filter
         listener = keyboard.Listener(**kwargs)
         listener.daemon = True
@@ -390,10 +412,19 @@ class HotkeyManager:
     # --- подавление ------------------------------------------------------------
 
     def _event_filter(self, msg, data):
-        """Не даёт клавише диктовки уйти в приложение под курсором."""
+        """Не даёт клавише диктовки и клавишам сочетаний уйти в приложение.
+
+        У клавиши диктовки хватает одного кода: она одиночная, и прятать её
+        надо всегда. У сочетания так нельзя — код клавиши там обычный, и,
+        подавляя его безусловно, мы отняли бы у человека саму букву: он
+        перестал бы набирать «у» и «г». Поэтому клавиша сочетания прячется
+        только вместе со своими модификаторами, а зажаты ли они, спрашиваем у
+        Windows. Один GetAsyncKeyState стоит 0.003 мс, а хук Windows молча
+        снимает примерно на 300 мс — запас в сто тысяч раз.
+        """
         try:
             if msg in (_WM_KEYDOWN, _WM_KEYUP, _WM_SYSKEYDOWN, _WM_SYSKEYUP):
-                if data.vkCode in self._suppress_vks:
+                if data.vkCode in self._suppress_vks or self._combo_key_held(data.vkCode):
                     listener = self._listener
                     if listener is not None:
                         listener.suppress_event()
@@ -401,6 +432,13 @@ class HotkeyManager:
             # Подавление — удобство, а не необходимость. Не работает — и ладно.
             pass
         return True
+
+    def _combo_key_held(self, vk: int) -> bool:
+        """Это клавиша сочетания, и его модификаторы сейчас зажаты."""
+        for main_vk, mod_vks in self._suppress_combos:
+            if vk == main_vk and all(key_is_down(m) for m in mod_vks):
+                return True
+        return False
 
     # --- обработка -------------------------------------------------------------
 
