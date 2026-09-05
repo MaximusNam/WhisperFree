@@ -89,6 +89,17 @@ class Job:
     pending: Record | None = None
 
 
+# Провайдер отвечает названием языка словом («Russian»), а в конфиге стоит
+# код («ru»). Сводим их, чтобы не писать в лог строку на каждой диктовке.
+_LANGUAGE_NAMES = {
+    "ru": "russian",
+    "uk": "ukrainian",
+    "en": "english",
+    "pl": "polish",
+    "de": "german",
+}
+
+
 class App:
     def __init__(self, cfg: config_mod.Config, root: tk.Tk | None = None) -> None:
         self.cfg = cfg
@@ -978,6 +989,18 @@ class App:
             self.overlay.error(str(exc), job.session)
             return
         watch.mark("api")
+        heard = getattr(self.provider, "last_language", "")
+        if heard:
+            asked = self.cfg.language.code_for(job.lang)
+            # Пишем, только когда язык не был задан или провайдер услышал не
+            # то: иначе строка «услышал русский» повторялась бы на каждой
+            # диктовке и перестала бы что-либо значить.
+            if not asked or not heard.lower().startswith(_LANGUAGE_NAMES.get(asked, asked)):
+                log.info(
+                    "провайдер услышал язык: %s%s",
+                    heard,
+                    "" if not asked else f" (просили {asked})",
+                )
         # Ответ получен — значит, за эту диктовку уже заплачено, чем бы ни
         # кончились чистка, правка и вставка. Ставим ДО них: дальше от ответа
         # может не остаться ни текста, ни следов, а деньги списаны. Запись

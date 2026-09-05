@@ -28,3 +28,4 @@ history.jsonl
 lexicon.json
 logs/
 whisperfree-debug.spec
+config.toml*.bak

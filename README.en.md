@@ -366,14 +366,33 @@ hardest case. If such text must survive verbatim, turn the refinement off —
 `[refine].enabled = false`. No model touches the text then, but nothing puts the
 punctuation in either.
 
-**Recognition.** The language lives in `[language]` and accepts any code Whisper
-knows — `ru`, `uk`, `en`, `pl`. The special value `auto` means "do not set it,
-let it decide", which is what mixed speech needs: a fixed language makes Whisper
-hear everything as that language. The price is accuracy on short or noisy takes.
+**Recognition — the prompt decides this, not the language setting.** Whisper
+detects the language ONCE, from the start of the recording, and decodes
+everything else in it; it cannot switch mid-sentence. So `auto` does not remove
+the choice of language, it turns it into a coin toss: hear a Ukrainian opening
+and the entire Russian part slides into Ukrainian.
+
+Measured on two mixed-speech recordings (45 marker words, Russian and Ukrainian
+interleaved):
+
+| setting | survived |
+|---|---|
+| `ru` + mixed prompt | **37 / 45** |
+| `auto` + trilingual prompt | 36 / 45 |
+| `ru` with no prompt | 30 / 45 |
+| `uk` + Ukrainian prompt | 29 / 45 |
+| `ru` + single-language Russian prompt | 27 / 45 |
+
+A single-language prompt turned out WORSE than none at all: it pulls recognition
+toward its own language. So for mixed speech keep your main language in `main`
+and add the second language's words straight into `prompt_ru`, spelled the way
+you say them.
 
 The prompt is looked up by name as `prompt_<code>`, so a new language is a line
-in the config rather than a code change. The `auto` prompt is deliberately
-trilingual — a single-language one would pull the whole text into its language.
+in the config rather than a code change.
+
+Which language the provider actually heard is written to the log whenever it
+differs from the one asked for. That substitution used to be invisible.
 
 ---
 

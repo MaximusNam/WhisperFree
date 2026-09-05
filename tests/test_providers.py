@@ -166,3 +166,43 @@ class TestEndpoint:
         p = OpenAICompatProvider("https://api.groq.com/openai/v1", "m", "k")
         assert p.name == "api.groq.com"
         p.close()
+
+
+class TestDetectedLanguage:
+    """Какой язык провайдер услышал — должно быть видно.
+
+    Whisper определяет язык ОДИН раз, по началу записи, и дальше
+    расшифровывает им всё остальное. На смешанной речи он может услышать
+    украинский, и тогда русская половина превращается в мусор — без этой
+    строки в логе причину не найти.
+    """
+
+    def test_the_language_comes_back_from_the_answer(self, provider, monkeypatch):
+        monkeypatch.setattr(
+            provider._client,
+            "post",
+            lambda *a, **k: response(200, {"text": "привіт", "language": "Ukrainian"}),
+        )
+        assert provider.transcribe(request()) == "привіт"
+        assert provider.last_language == "Ukrainian"
+
+    def test_the_language_is_cleared_before_each_request(self, provider, monkeypatch):
+        provider.last_language = "Ukrainian"
+        monkeypatch.setattr(
+            provider._client, "post", lambda *a, **k: response(200, {"text": "привет"})
+        )
+        provider.transcribe(request())
+        # Иначе после ответа без языка в логе висел бы язык прошлой диктовки.
+        assert provider.last_language == ""
+
+    def test_verbose_json_is_requested(self, provider, monkeypatch):
+        """Обычный json поля language не содержит, и спросить потом уже негде."""
+        seen = {}
+
+        def spy(*args, **kwargs):
+            seen.update(kwargs.get("data") or {})
+            return response(200, {"text": "ок"})
+
+        monkeypatch.setattr(provider._client, "post", spy)
+        provider.transcribe(request())
+        assert seen.get("response_format") == "verbose_json"

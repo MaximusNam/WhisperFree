@@ -38,6 +38,11 @@ class OpenAICompatProvider:
         self.timeout_s = timeout_s
         self.max_retries = max(0, int(max_retries))
         self.name = _host_of(self.base_url)
+        # Язык, который провайдер услышал в последней записи. Нужен, чтобы
+        # подмена языка перестала быть невидимой: когда Whisper слышит
+        # смешанную речь как украинскую, русская половина превращается в
+        # мусор, и без этой строки в логе причину не найти.
+        self.last_language = ""
         self._client = httpx.Client(timeout=timeout_s)
 
     @property
@@ -50,8 +55,11 @@ class OpenAICompatProvider:
                 "нет API-ключа — задайте его в .env рядом с программой"
             )
 
+        self.last_language = ""
         files = {"file": (request.filename, request.audio, "application/octet-stream")}
-        data: dict[str, str] = {"model": self.model, "response_format": "json"}
+        # verbose_json вместо json: тот же запрос и та же цена, но в ответе
+        # есть поле language — какой язык провайдер определил.
+        data: dict[str, str] = {"model": self.model, "response_format": "verbose_json"}
         if request.language:
             data["language"] = request.language
         if request.prompt:
@@ -90,6 +98,12 @@ class OpenAICompatProvider:
         if response.status_code >= 400:
             raise _http_error(response)
 
+        try:
+            payload = response.json()
+            if isinstance(payload, dict):
+                self.last_language = str(payload.get("language") or "")
+        except Exception:  # pragma: no cover — ответ разберёт _extract_text
+            pass
         return _extract_text(response)
 
     def close(self) -> None:
