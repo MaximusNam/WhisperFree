@@ -213,14 +213,31 @@ encode = "flac"
 hold_open = true
 
 [language]
-# Язык основной клавиши и альтернативной.
+# Язык основной клавиши и альтернативной. Подходит любой код, который знает
+# Whisper: ru, uk, en, pl, de и так далее.
+#
+# Особое значение "auto" — язык не задавать, пусть распознавание определит
+# само. Это нужно, когда в одной диктовке несколько языков сразу: заданный
+# язык заставляет Whisper слышать ВСЁ как этот язык, и украинские слова
+# посреди русской фразы он перепишет по-русски. Платой за "auto" будет
+# точность на коротких и шумных записях: язык там определяется хуже.
 main = "ru"
 alt = "en"
 
-# Затравка для модели: задаёт пунктуацию и написание терминов латиницей.
-# Не больше 224 токенов. Добавляйте сюда свои термины.
+# Затравка для распознавания: задаёт пунктуацию и написание терминов
+# латиницей. Не больше 224 токенов на всю затравку вместе с выученными
+# словами. Добавляйте сюда свои термины.
+#
+# Имя строки — это prompt_<код языка>, поэтому для нового языка достаточно
+# дописать сюда строку, кода править не надо.
 prompt_ru = "Привет! Как дела? Он сказал: «Сделаем это сегодня — пока есть время». Работаем с Docker, GitHub, Python, Claude Code, Gemini, ChatGPT, API, Windows, Linux, pull request, commit, deploy."
 prompt_en = "Hello! How are you? He said: it is done. We work with Docker, GitHub, Python, Claude Code, Gemini, API, pull request, commit, deploy."
+prompt_uk = "Привіт! Як справи? Він сказав: «Зробимо це сьогодні — поки є час». Працюємо з Docker, GitHub, Python, Claude Code, Gemini, ChatGPT, API, Windows, Linux, pull request, commit, deploy."
+
+# Затравка для main = "auto". Здесь нарочно все три языка вперемешку: затравка
+# склоняет распознавание к тому, что в ней написано, и одноязычная вернула бы
+# нас к той же беде — весь текст съезжал бы в её язык.
+prompt_auto = "Привет! Как дела? Привіт, як справи? Hello, how are you? Треба зробити звіт, а потом я пойду на встречу. Работаем с Docker, GitHub, Python, Claude Code, Gemini, API, pull request, commit, deploy."
 
 [postprocess]
 enabled = true
@@ -418,15 +435,36 @@ class AudioConfig:
     hold_open: bool = True
 
 
+# Язык, который распознавание определяет само. Whisper принимает код языка
+# или ничего; «ничего» и означает «определи сам», поэтому значение сюда
+# приходит из конфига, а до провайдера доезжает пустотой — см. code_for.
+AUTO_LANGUAGE = "auto"
+
+
 @dataclass
 class LanguageConfig:
     main: str = "ru"
     alt: str = "en"
     prompt_ru: str = ""
     prompt_en: str = ""
+    prompt_uk: str = ""
+    prompt_auto: str = ""
 
     def prompt_for(self, lang: str) -> str:
-        return self.prompt_en if lang == "en" else self.prompt_ru
+        """Затравка для языка. Ищется по имени, поэтому новый язык — это
+        новая строка prompt_<код> в конфиге, а не правка кода."""
+        key = f"prompt_{(lang or AUTO_LANGUAGE).strip().lower()}"
+        return str(getattr(self, key, "") or "")
+
+    @staticmethod
+    def code_for(lang: str) -> str | None:
+        """Код языка для провайдера. None — пусть определяет сам.
+
+        Отдавать «auto» провайдеру нельзя: такого кода нет, и Whisper либо
+        отвергнет запрос, либо поймёт его как язык с таким названием.
+        """
+        code = (lang or "").strip().lower()
+        return None if code in ("", AUTO_LANGUAGE) else code
 
 
 @dataclass

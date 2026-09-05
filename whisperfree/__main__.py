@@ -239,6 +239,17 @@ class App:
             self.cfg.language.alt,
             self.cfg.hotkeys.paste_last,
         )
+        for label, lang in (("основной", self.cfg.language.main),
+                            ("альтернативный", self.cfg.language.alt)):
+            if lang and not self.cfg.language.prompt_for(lang):
+                # Молчать нельзя: без затравки распознавание теряет термины и
+                # пунктуацию, а причина этого ниоткуда не видна.
+                log.info(
+                    "для языка %s (%s) нет затравки — добавьте prompt_%s "
+                    "в раздел [language] конфига",
+                    lang, label, lang,
+                )
+
         if not self.cfg.provider.api_key:
             message = (
                 f"нет ключа {self.cfg.provider.api_key_env} — "
@@ -951,7 +962,9 @@ class App:
                 TranscriptionRequest(
                     audio=data,
                     filename=filename,
-                    language=job.lang,
+                    # Не сам job.lang: «auto» до провайдера доезжать не
+                    # должен, там его нет среди кодов языков.
+                    language=self.cfg.language.code_for(job.lang),
                     prompt=self._stt_prompt(job.lang),
                     duration_s=job.capture.duration_s,
                 )
@@ -1373,7 +1386,7 @@ def cmd_check(cfg: config_mod.Config) -> int:
             TranscriptionRequest(
                 audio=data,
                 filename=filename,
-                language=cfg.language.main,
+                language=cfg.language.code_for(cfg.language.main),
                 prompt=cfg.language.prompt_for(cfg.language.main),
                 duration_s=capture.duration_s,
             )

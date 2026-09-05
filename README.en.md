@@ -96,6 +96,7 @@ shows both what the headers carry and your own measured spend per dictation.
 - [When the paste does not land](#when-the-paste-does-not-land)
 - [Mixed-language dictation](#mixed-language-dictation)
 - [The history and lexicon windows](#the-history-and-lexicon-windows)
+- [Several languages in one dictation](#several-languages-in-one-dictation)
 - [It learns from your corrections](#it-learns-from-your-corrections)
 - [Model-based text refinement](#model-based-text-refinement)
 - [What it costs](#what-it-costs)
@@ -345,6 +346,34 @@ Click to select a record; double-click pastes it (history) or forgets it
 (lexicon); the up and down arrows walk the list and Enter does what a
 double-click does. Text in the window can be selected with the mouse and copied
 with the usual Ctrl+C — the list simply refuses to be edited.
+
+---
+
+## Several languages in one dictation
+
+You can speak the way you actually speak: Russian, Ukrainian and English words
+in a single sentence. The program no longer flattens the text into one language.
+
+This did not work by itself. The editor model fixes agreement, and it treated a
+Ukrainian word inside a Russian sentence as a mistake — "це працює нормально но
+иногда падает" came back as "але іноді падає". Measured on sixteen mixed
+sentences with marker words on both sides: 68% of the words survived and 10 of
+12 sentences were flattened. With an explicit ban on translating: 95%, and 3 of
+16. Four wordings of the ban were tested; the best by measurement is shipped.
+
+The honest remainder: a Russian clause inside a mostly-Ukrainian sentence is the
+hardest case. If such text must survive verbatim, turn the refinement off —
+`[refine].enabled = false`. No model touches the text then, but nothing puts the
+punctuation in either.
+
+**Recognition.** The language lives in `[language]` and accepts any code Whisper
+knows — `ru`, `uk`, `en`, `pl`. The special value `auto` means "do not set it,
+let it decide", which is what mixed speech needs: a fixed language makes Whisper
+hear everything as that language. The price is accuracy on short or noisy takes.
+
+The prompt is looked up by name as `prompt_<code>`, so a new language is a line
+in the config rather than a code change. The `auto` prompt is deliberately
+trilingual — a single-language one would pull the whole text into its language.
 
 ---
 

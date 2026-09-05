@@ -23,6 +23,7 @@ from whisperfree.refine import (
     clean,
     refusal_opening,
     similarity,
+    translit,
 )
 
 ORIGINAL = "поставь докер и проверь через джемини почему пул реквест не проходит"
@@ -173,6 +174,56 @@ class TestGuardsAgainstTheModelGoingRogue:
         # Пунктуация и заглавные буквы длину почти не меняют.
         monkeypatch.setattr(refiner._client, "post", Post(reply(FIXED)))
         assert refiner.refine(ORIGINAL) == FIXED
+
+
+class TestMixedLanguages:
+    """Человек диктует так, как говорит: русские, украинские и английские
+    слова в одном предложении. Модели сказано исправлять согласование, и без
+    прямого запрета она приводит фразу к одному языку.
+
+    Замер на шестнадцати смешанных фразах, где помечены слова с ОБЕИХ сторон:
+    без запрета уцелевало 68 % слов и портилось 10 фраз из 12, с запретом —
+    95 % и 3 из 16.
+    """
+
+    def test_the_prompt_forbids_translating(self):
+        assert "НИКОГДА не переводи" in DEFAULT_PROMPT
+        assert "смешанный" in DEFAULT_PROMPT
+
+    def test_the_prompt_keeps_the_clause_that_stops_the_model_answering(self):
+        # Эта оговорка держит отдельную беду: без неё модель отвечала на
+        # диктовку вместо правки. Новый запрет её не вытеснил.
+        assert "ДАННЫЕ" in DEFAULT_PROMPT
+        assert "не обращение к тебе" in DEFAULT_PROMPT
+
+    def test_ukrainian_letters_survive_transliteration(self):
+        """Без і, ї, є, ґ согласный скелет украинского слова оставался с
+        кириллицей внутри, и сравнение с латиницей рассыпалось."""
+        assert translit("гітхаб") == "githab"
+        assert translit("їжа") == "izha"
+        assert translit("є") == "e"
+        assert translit("ґанок") == "ganok"
+        # Апостроф на звучание не влияет и мешал бы сравнению.
+        assert translit("п'ятниця") == "patnica"
+        for letter in "іїєґ":
+            assert letter not in translit(letter), f"{letter} не транслитерируется"
+
+    def test_ukrainian_terms_match_their_latin_spelling(self):
+        pairs = [
+            ("гітхаб", "GitHub"), ("пітон", "Python"), ("джемині", "Gemini"),
+            ("редіс", "Redis"), ("фігма", "Figma"), ("лінукс", "Linux"),
+            ("віндовс", "Windows"),
+        ]
+        for wrong, right in pairs:
+            assert similarity(wrong, right) > 0.5, f"{wrong} -> {right}"
+
+    def test_a_mixed_sentence_is_not_rejected_as_a_hijack(self):
+        """Проверка приёмки не должна принимать смешанную фразу за подмену:
+        язык там разный по замыслу, а не потому что модель написала своё."""
+        original = "треба зробити звіт а потом я пойду на встречу"
+        refined = "Треба зробити звіт, а потом я пойду на встречу."
+        ok, why = accept(original, refined, 1.8)
+        assert ok, why
 
 
 class TestAccept:
