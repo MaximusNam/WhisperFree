@@ -96,7 +96,6 @@ shows both what the headers carry and your own measured spend per dictation.
 - [When the paste does not land](#when-the-paste-does-not-land)
 - [Mixed-language dictation](#mixed-language-dictation)
 - [The history and lexicon windows](#the-history-and-lexicon-windows)
-- [Several languages in one dictation](#several-languages-in-one-dictation)
 - [It learns from your corrections](#it-learns-from-your-corrections)
 - [Model-based text refinement](#model-based-text-refinement)
 - [What it costs](#what-it-costs)
@@ -346,53 +345,6 @@ Click to select a record; double-click pastes it (history) or forgets it
 (lexicon); the up and down arrows walk the list and Enter does what a
 double-click does. Text in the window can be selected with the mouse and copied
 with the usual Ctrl+C — the list simply refuses to be edited.
-
----
-
-## Several languages in one dictation
-
-You can speak the way you actually speak: Russian, Ukrainian and English words
-in a single sentence. The program no longer flattens the text into one language.
-
-This did not work by itself. The editor model fixes agreement, and it treated a
-Ukrainian word inside a Russian sentence as a mistake — "це працює нормально но
-иногда падает" came back as "але іноді падає". Measured on sixteen mixed
-sentences with marker words on both sides: 68% of the words survived and 10 of
-12 sentences were flattened. With an explicit ban on translating: 95%, and 3 of
-16. Four wordings of the ban were tested; the best by measurement is shipped.
-
-The honest remainder: a Russian clause inside a mostly-Ukrainian sentence is the
-hardest case. If such text must survive verbatim, turn the refinement off —
-`[refine].enabled = false`. No model touches the text then, but nothing puts the
-punctuation in either.
-
-**Recognition — the prompt decides this, not the language setting.** Whisper
-detects the language ONCE, from the start of the recording, and decodes
-everything else in it; it cannot switch mid-sentence. So `auto` does not remove
-the choice of language, it turns it into a coin toss: hear a Ukrainian opening
-and the entire Russian part slides into Ukrainian.
-
-Measured on two mixed-speech recordings (45 marker words, Russian and Ukrainian
-interleaved):
-
-| setting | survived |
-|---|---|
-| `ru` + mixed prompt | **37 / 45** |
-| `auto` + trilingual prompt | 36 / 45 |
-| `ru` with no prompt | 30 / 45 |
-| `uk` + Ukrainian prompt | 29 / 45 |
-| `ru` + single-language Russian prompt | 27 / 45 |
-
-A single-language prompt turned out WORSE than none at all: it pulls recognition
-toward its own language. So for mixed speech keep your main language in `main`
-and add the second language's words straight into `prompt_ru`, spelled the way
-you say them.
-
-The prompt is looked up by name as `prompt_<code>`, so a new language is a line
-in the config rather than a code change.
-
-Which language the provider actually heard is written to the log whenever it
-differs from the one asked for. That substitution used to be invisible.
 
 ---
 

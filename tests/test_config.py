@@ -118,39 +118,9 @@ class TestLanguagePrompts:
         assert cfg.language.prompt_for("ru") == cfg.language.prompt_ru
         assert cfg.language.prompt_for("en") == cfg.language.prompt_en
 
-    def test_ukrainian_has_its_own_prompt(self):
+    def test_unknown_language_falls_back_to_russian(self):
         cfg = parse(DEFAULT_CONFIG_TOML)
-        assert cfg.language.prompt_for("uk") == cfg.language.prompt_uk
-        assert "Привіт" in cfg.language.prompt_uk
-
-    def test_the_auto_prompt_mixes_the_languages(self):
-        """Затравка склоняет распознавание к тому, что в ней написано.
-        Одноязычная при main = "auto" вернула бы ту же беду, ради которой
-        «auto» и заводили: весь текст съезжал бы в её язык."""
-        cfg = parse(DEFAULT_CONFIG_TOML)
-        mixed = cfg.language.prompt_for("auto")
-        assert "Привет" in mixed, "нет русского"
-        assert "Привіт" in mixed, "нет украинского"
-        assert "Hello" in mixed, "нет английского"
-
-    def test_a_language_without_a_prompt_gets_none_instead_of_russian(self):
-        """Раньше неизвестный язык получал РУССКУЮ затравку. Для main = "de"
-        это вредно вдвойне: затравка не просто бесполезна, она тянет
-        распознавание в русский. Пустая честнее, а как добавить свою —
-        написано в самом конфиге."""
-        cfg = parse(DEFAULT_CONFIG_TOML)
-        assert cfg.language.prompt_for("de") == ""
-
-    def test_auto_never_reaches_the_provider_as_a_language_code(self):
-        """Кода «auto» у Whisper нет: он либо отвергнет запрос, либо поймёт
-        его как язык с таким названием."""
-        from whisperfree.config import LanguageConfig
-
-        assert LanguageConfig.code_for("auto") is None
-        assert LanguageConfig.code_for("") is None
-        assert LanguageConfig.code_for("AUTO") is None
-        assert LanguageConfig.code_for(" uk ") == "uk"
-        assert LanguageConfig.code_for("ru") == "ru"
+        assert cfg.language.prompt_for("de") == cfg.language.prompt_ru
 
 
 class TestDiagnostics:
