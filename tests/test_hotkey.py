@@ -349,3 +349,130 @@ class TestLostRelease:
         manager._on_release(keyboard.Key.ctrl_r)
         assert events == ["start", "stop"]
         assert asked == []
+
+
+
+class TestDeafHook:
+    """Хук, который Windows сняла, оставив его поток живым.
+
+    Живой случай 14.09: после очереди нажатий программа перестала реагировать
+    совсем. Снимок потоков показал, что ни один не висит: поток хука сидел в
+    своём цикле сообщений и ждал событий, которых больше не было. Сторож
+    проверял только «жив ли поток» — listener.running честно отвечал True, — и
+    программа оставалась глухой до перезапуска.
+    """
+
+    def make(self, monkeypatch):
+        manager = HotkeyManager(suppress=False)
+        manager.register_hold("ctrl_r", lambda: None, lambda: None)
+        self.key = {"down": False}
+        monkeypatch.setattr(hotkey_mod, "key_is_down", lambda vk: self.key["down"])
+        manager.rebuilt = 0
+
+        def fake_rebuild():
+            manager.rebuilt += 1
+
+        # Настоящая пересборка трогает хук Windows — в тесте нужен только счёт.
+        manager._rebuild = fake_rebuild
+        manager._fire = lambda callback: callback()
+        return manager
+
+    def tick(self, manager, down, times=1):
+        self.key["down"] = down
+        for _ in range(times):
+            manager._check_deaf()
+
+    def test_a_held_key_the_hook_never_saw_rebuilds_the_hook(self, monkeypatch):
+        manager = self.make(monkeypatch)
+        self.tick(manager, down=False)          # видели отпущенной
+        self.tick(manager, down=True, times=hotkey_mod.DEAF_TICKS)
+        assert manager.rebuilt == 1
+        assert manager.deaf_hooks == 1
+
+    def test_a_live_hook_is_left_alone(self, monkeypatch):
+        manager = self.make(monkeypatch)
+        self.tick(manager, down=False)
+        # Хук нажатие увидел — удержание активно.
+        manager._on_press(keyboard.Key.ctrl_r)
+        self.tick(manager, down=True, times=10)
+        assert manager.rebuilt == 0
+
+    def test_a_single_tick_is_not_enough(self, monkeypatch):
+        """Сторож мог спросить Windows в те миллисекунды, когда клавишу уже
+        нажали, а событие ещё не дошло до хука. Это не глухота."""
+        manager = self.make(monkeypatch)
+        self.tick(manager, down=False)
+        self.tick(manager, down=True, times=hotkey_mod.DEAF_TICKS - 1)
+        self.tick(manager, down=False)
+        assert manager.rebuilt == 0
+
+    def test_a_key_held_since_startup_is_not_taken_for_deafness(self, monkeypatch):
+        # Новый хук не видит клавишу, зажатую до его установки: судить о нём
+        # по такой клавише нельзя.
+        manager = self.make(monkeypatch)
+        self.tick(manager, down=True, times=20)
+        assert manager.rebuilt == 0
+
+    def test_no_rebuild_loop_while_the_key_stays_down(self, monkeypatch):
+        """После пересборки человек может так и держать клавишу. Без
+        оговорки это была бы пересборка на каждом шаге сторожа."""
+        manager = self.make(monkeypatch)
+        self.tick(manager, down=False)
+        self.tick(manager, down=True, times=30)
+        assert manager.rebuilt == 1
+
+    def test_after_release_the_detector_is_armed_again(self, monkeypatch):
+        manager = self.make(monkeypatch)
+        self.tick(manager, down=False)
+        self.tick(manager, down=True, times=hotkey_mod.DEAF_TICKS)
+        self.tick(manager, down=False)
+        self.tick(manager, down=True, times=hotkey_mod.DEAF_TICKS)
+        assert manager.rebuilt == 2
+
+    def test_the_application_is_told(self, monkeypatch):
+        # Нажатие, на котором выяснилась глухота, уже потеряно. Человеку надо
+        # сказать, что можно нажать ещё раз.
+        manager = self.make(monkeypatch)
+        told = []
+        manager.on_deaf = lambda: told.append(True)
+        self.tick(manager, down=False)
+        self.tick(manager, down=True, times=hotkey_mod.DEAF_TICKS)
+        assert told == [True]
+
+    def test_the_rebuild_is_written_to_the_log(self, monkeypatch, caplog):
+        manager = self.make(monkeypatch)
+        with caplog.at_level(logging.WARNING, logger="whisperfree.hotkey"):
+            self.tick(manager, down=False)
+            self.tick(manager, down=True, times=hotkey_mod.DEAF_TICKS)
+        assert any("оглох" in r.getMessage() for r in caplog.records)
+
+    def test_a_key_without_a_code_is_not_polled(self, monkeypatch):
+        manager = HotkeyManager(suppress=False)
+        manager.register_hold("vk999999", lambda: None, lambda: None)
+        manager._holds[0].vk = None
+        asked = []
+        monkeypatch.setattr(hotkey_mod, "key_is_down", lambda vk: asked.append(vk) or True)
+        manager._check_deaf()
+        assert asked == []
+
+    def test_the_watchdog_runs_the_detector(self, monkeypatch):
+        """Детектор бесполезен, если сторож его не зовёт."""
+        import threading
+        import time as _time
+        from types import SimpleNamespace
+
+        manager = HotkeyManager(suppress=False)
+        manager.register_hold("ctrl_r", lambda: None, lambda: None)
+        manager._listener = SimpleNamespace(running=True)
+        calls = []
+        manager._check_deaf = lambda: calls.append(True) or False
+        monkeypatch.setattr(hotkey_mod, "WATCH_TICK", 0.01)
+
+        thread = threading.Thread(target=manager._watch, daemon=True)
+        thread.start()
+        deadline = _time.monotonic() + 2.0
+        while not calls and _time.monotonic() < deadline:
+            _time.sleep(0.01)
+        manager._stop.set()
+        thread.join(timeout=1.0)
+        assert calls, "сторож ни разу не позвал детектор"
