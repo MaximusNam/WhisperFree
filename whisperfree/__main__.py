@@ -172,6 +172,7 @@ class App:
             self.lexicon,
             on_change=self._apply_lexicon,
             on_font=self._change_font,
+            on_submit=self._learn_text,
         )
         # Раскладываем выученное по местам сразу: без этого первая диктовка
         # после запуска шла бы без всего, чему программа успела научиться.
@@ -1214,41 +1215,68 @@ class App:
             self.overlay.error(problem or "выделите исправленный текст", session)
             return
 
+        outcome = self._learn_text(selection)
+        if outcome.ok:
+            self.overlay.ok(outcome.short(), session)
+            self.lexicon_window.notify_changed()
+            return
+        # Причина отказа на плашку не помещается: там около 19 знаков. Поэтому
+        # плашка говорит коротко, а подробности — в окне правок, где выделенный
+        # текст уже стоит в поле: его можно поправить и отправить снова.
+        self.overlay.error(outcome.short(), session)
+        self.lexicon_window.show_attempt(selection, outcome)
+
+    def _learn_text(self, text: str) -> lexicon_mod.LearnOutcome:
+        """Сравнить исправленный текст со своей диктовкой и запомнить разницу.
+
+        Общая часть двух путей: хоткея по выделенному и поля в окне правок.
+        Зовётся не из потока Tk: поиск по истории и запись файла правок могут
+        занять десятки миллисекунд, а в потоке Tk живёт насос плашки.
+        """
+        Outcome = lexicon_mod.LearnOutcome
+        if not self.cfg.lexicon.enabled:
+            return Outcome(problem="Обучение выключено в конфиге: [lexicon].enabled = false.")
+        text = (text or "").strip()
+        if not text:
+            return Outcome(problem="Текст пустой — сравнивать не с чем.")
+
         # Ищем по похожести, а не по времени: правя текст, человек мог сходить
         # в другое окно и продиктовать что-то ещё. Заодно так отсекается
-        # случай, когда выделили вообще не нашу диктовку.
+        # случай, когда прислали вообще не нашу диктовку.
+        depth = lexicon_mod.LEARN_DEPTH
         record, ratio = lexicon_mod.find_source(
-            selection, self.history.recent(30), self.cfg.lexicon.min_match
+            text, self.history.recent(depth), self.cfg.lexicon.min_match
         )
         if record is None:
             log.info(
-                "обучение: выделенное не похоже ни на одну диктовку "
+                "обучение: текст не похож ни на одну диктовку "
                 "(лучшее совпадение %.0f%%)", ratio * 100,
             )
-            self.overlay.error("не нашёл эту диктовку в истории", session)
-            return
+            return Outcome(problem=(
+                f"Не нашёл такую диктовку среди последних {depth}: лучшее "
+                f"совпадение {ratio:.0%}, а нужно от {self.cfg.lexicon.min_match:.0%}. "
+                "Пришлите исправленный текст целиком, а не отдельные слова."
+            ))
 
         learned, refused = self.lexicon.learn(
             record.text,
-            selection,
+            text,
             raw=record.raw,
             lang=record.lang,
             dictionary=self.cfg.postprocess.replacements,
         )
         for line in refused:
             log.info("обучение отклонило %s", line)
-
         if not learned:
             reason = refused[0] if refused else "различий не нашёл"
             log.info("обучение: ничего не запомнил — %s", reason)
-            self.overlay.error(_learn_failure(refused), session)
-            return
+            return Outcome(refused=refused)
 
         self._apply_lexicon()
         for lesson in learned:
             log.info("выучил: %s", self.lexicon.describe(lesson))
         self._refresh_tray()
-        self.overlay.ok(_learn_report(learned), session)
+        return Outcome(learned=learned, refused=refused)
 
     # --- повторная вставка -----------------------------------------------------
 
@@ -1302,28 +1330,6 @@ class App:
             self.overlay.ok("скопировано в буфер", session)
         else:
             self.overlay.error("не удалось положить в буфер", session)
-
-
-def _learn_report(learned: list) -> str:
-    """Короткая строка для плашки: что именно программа запомнила.
-
-    В плашку влезает 34 знака, поэтому при нескольких правках показываем
-    первую и число остальных — подробности всё равно в логе и в окне.
-    """
-    first = f"{learned[0].wrong} → {learned[0].right}"
-    if len(learned) == 1:
-        return f"выучил: {first}"
-    return f"выучил {len(learned)}: {first}…"
-
-
-def _learn_failure(refused: list[str]) -> str:
-    """Почему ничего не запомнилось. Человек нажал клавишу и ждёт ответа."""
-    if not refused:
-        return "правок не вижу: текст совпадает"
-    # В сообщении оставляем только причину: пара «было → стало» в него не
-    # влезает, а в логе она есть целиком.
-    reason = refused[0].split(": ", 1)[-1]
-    return f"не запомнил: {reason}"
 
 
 # --- вспомогательные режимы ----------------------------------------------------

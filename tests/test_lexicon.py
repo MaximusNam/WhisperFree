@@ -18,6 +18,7 @@ from whisperfree.lexicon import (
     RECOGNITION,
     REFINE,
     UNKNOWN,
+    LearnOutcome,
     Lesson,
     Lexicon,
     blame,
@@ -585,3 +586,75 @@ class TestDescription:
         lex = make(tmp_path)
         lesson = Lesson(wrong="докер", right="Docker", kind=REFINE, hits=1)
         assert "модель" in lex.describe(lesson)
+
+
+class TestLatinGarbageIsAHint:
+    """Латиницу, которую человек заменил русскими словами, выдумал Whisper.
+
+    Живой случай: «на ноге В3» распознавание четырежды записало как «на Gb3»
+    (01.09, 19.09, 21.09, 23.09), и каждую правку отклоняли как перевод:
+    звучание ведь не сходится. Не сходится оно потому, что Whisper услышал,
+    как услышал, — а переводом замена латинской абракадабры русскими словами
+    быть не может.
+    """
+
+    PAIRS = [("Gb3", "ноге В3"), ("На Gb1", "Нога В1")]
+
+    @pytest.mark.parametrize("wrong, right", PAIRS)
+    def test_it_is_learned(self, wrong, right):
+        ok, why = learnable(wrong, right)
+        assert ok, f"{wrong!r} → {right!r} отклонено: {why}"
+
+    @pytest.mark.parametrize("wrong, right", PAIRS)
+    def test_but_never_as_a_rule(self, wrong, right):
+        # Замена правит ВЕСЬ будущий текст, а звучание не сходится — значит,
+        # уверенности нет. Подсказка ничего не заменяет и потому безвредна.
+        assert not can_be_rule(wrong, right)
+
+    @pytest.mark.parametrize("russian, english", [("встреча", "meeting"), ("созвон", "call")])
+    def test_russian_turned_into_english_is_still_a_translation(self, russian, english):
+        ok, why = learnable(russian, english)
+        assert not ok
+        assert "перевод" in why
+
+    def test_it_reaches_the_prompt_and_not_the_replacements(self, tmp_path):
+        lex = Lexicon(tmp_path / "lexicon.json", LexiconConfig())
+        for _ in range(3):
+            # Трижды — чтобы повторы не превратили подсказку в замену.
+            learned, refused = lex.learn(
+                "Почему на Gb3 не было монет?", "Почему на ноге В3 не было монет?"
+            )
+            assert [(item.wrong, item.right) for item in learned] == [("Gb3", "ноге В3")]
+        assert lex.replacements() == {}
+        assert "ноге В3" in lex.vocabulary()
+
+
+class TestLearnOutcome:
+    """Итог попытки: коротко для плашки, целиком для окна."""
+
+    REASON = "«Gb3» → «ноге В3»: разное звучание — похоже на перевод, а не на ошибку слуха"
+
+    def test_a_failure_on_the_plate_is_short_enough_to_read(self):
+        # На плашке помещается около 19 знаков: от прежнего «не запомнил:
+        # разное звучание…» там оставалось «не запомнил: разно…».
+        short = LearnOutcome(refused=[self.REASON]).short()
+        assert short == "не запомнил"
+        assert len(short) <= 19
+
+    def test_the_window_gets_the_whole_reason(self):
+        assert self.REASON in LearnOutcome(refused=[self.REASON]).full(str)
+
+    def test_a_problem_comes_first(self):
+        full = LearnOutcome(problem="Не нашёл такую диктовку.").full(str)
+        assert full.startswith("Не нашёл")
+
+    def test_success_names_the_pair(self, tmp_path):
+        lex = Lexicon(tmp_path / "lexicon.json", LexiconConfig())
+        learned, _ = lex.learn("поднял редис", "поднял Redis")
+        outcome = LearnOutcome(learned=learned)
+        assert outcome.ok
+        assert outcome.short() == "выучил: редис → Redis"
+        assert lex.describe(learned[0]) in outcome.full(lex.describe)
+
+    def test_nothing_to_say_still_says_something(self):
+        assert LearnOutcome().full(str)

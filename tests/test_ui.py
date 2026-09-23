@@ -1209,3 +1209,127 @@ class TestLexiconWindow:
         pump(root)
         win._zoom(1)
         assert asked == [1]
+
+
+class TestSendCorrectionFromTheWindow:
+    """Второй путь: вставить исправленный текст в окно правок и отправить."""
+
+    @pytest.fixture
+    def lex(self, tmp_path):
+        from whisperfree.config import LexiconConfig
+        from whisperfree.lexicon import Lexicon
+
+        return Lexicon(tmp_path / "lexicon.json", LexiconConfig())
+
+    def window(self, root, lex, outcome=None, seen=None):
+        import threading
+
+        from whisperfree.lexicon_window import LexiconWindow
+
+        def submit(text):
+            if seen is not None:
+                seen.append((text, threading.current_thread() is threading.main_thread()))
+            return outcome
+
+        win = LexiconWindow(root, lex, on_submit=submit)
+        win.open()
+        pump(root)
+        return win
+
+    def send(self, root, win, text):
+        win._box.delete("1.0", "end")
+        win._box.insert("1.0", text)
+        win._submit()
+        for _ in range(40):
+            pump(root, times=1)
+            if not str(win._result.cget("text")).startswith("Сравниваю"):
+                return
+        raise AssertionError("итог отправки так и не появился")
+
+    def test_the_text_is_sent_off_the_tk_thread(self, root, lex):
+        """Поиск по истории и запись файла — десятки миллисекунд, а в потоке
+        Tk живёт насос плашки."""
+        from whisperfree.lexicon import LearnOutcome
+
+        seen = []
+        win = self.window(root, lex, outcome=LearnOutcome(refused=["x"]), seen=seen)
+        self.send(root, win, "  исправленный текст  ")
+        assert seen == [("исправленный текст", False)]
+
+    def test_the_whole_reason_is_shown(self, root, lex):
+        from whisperfree.lexicon import LearnOutcome
+
+        reason = "«Gb3» → «ноге В3»: разное звучание — похоже на перевод, а не на ошибку слуха"
+        win = self.window(root, lex, outcome=LearnOutcome(refused=[reason]))
+        self.send(root, win, "Почему на ноге В3 не было монет?")
+        assert reason in win._result.cget("text"), "причину обрезали"
+
+    def test_a_refused_text_stays_in_the_box(self, root, lex):
+        from whisperfree.lexicon import LearnOutcome
+
+        win = self.window(root, lex, outcome=LearnOutcome(refused=["x"]))
+        self.send(root, win, "текст с ошибкой")
+        # Его поправят и отправят снова — стирать нельзя.
+        assert win._box.get("1.0", "end-1c") == "текст с ошибкой"
+
+    def test_a_learned_text_leaves_the_box_and_joins_the_list(self, root, lex):
+        from whisperfree.lexicon import LearnOutcome
+
+        learned, _ = lex.learn("поднял редис", "поднял Redis")
+        win = self.window(root, lex, outcome=LearnOutcome(learned=learned))
+        self.send(root, win, "поднял Redis")
+        assert win._box.get("1.0", "end-1c") == ""
+        assert "редис → Redis" in shown_text(win._list)
+
+    def test_an_empty_box_says_so(self, root, lex):
+        seen = []
+        win = self.window(root, lex, seen=seen)
+        win._box.delete("1.0", "end")
+        win._submit()
+        assert seen == [], "пустое поле ушло на сравнение"
+        assert "пустое" in win._result.cget("text")
+
+    def test_ctrl_v_works_on_any_layout(self, root, lex):
+        """Tk сопоставляет Ctrl+V по символу раскладки, и на русской его
+        собственная привязка молчит. Поле обязано понимать код клавиши."""
+        win = self.window(root, lex)
+        pasted = []
+        # Перехватываем саму вставку, чтобы не трогать настоящий буфер обмена.
+        win._box.bind("<<Paste>>", lambda _e: pasted.append(True) or "break")
+
+        class CtrlV:
+            keycode = 86  # физическая V: на русской раскладке это «м»
+            widget = win._box
+
+        assert win._keys_by_code(CtrlV) == "break", "без break Tk вставил бы ещё раз"
+        pump(root, times=1)
+        assert pasted == [True]
+
+    def test_ordinary_letters_are_left_to_tk(self, root, lex):
+        win = self.window(root, lex)
+
+        class CtrlB:
+            keycode = 66
+            widget = win._box
+
+        assert win._keys_by_code(CtrlB) is None
+
+    def test_a_failed_hotkey_attempt_opens_the_window_with_the_text(self, root, lex):
+        from whisperfree.lexicon import LearnOutcome
+        from whisperfree.lexicon_window import LexiconWindow
+
+        reason = "«Gb3» → «ноге В3»: разное звучание — похоже на перевод, а не на ошибку слуха"
+        win = LexiconWindow(root, lex)
+        win.show_attempt("Почему на ноге В3 не было монет?", LearnOutcome(refused=[reason]))
+        pump(root)
+        assert win._window is not None and win._window.winfo_exists()
+        assert win._box.get("1.0", "end-1c") == "Почему на ноге В3 не было монет?"
+        assert reason in win._result.cget("text")
+
+    def test_the_list_follows_a_hotkey_lesson(self, root, lex):
+        win = self.window(root, lex)
+        assert win._list.count == 0
+        lex.learn("поднял редис", "поднял Redis")
+        win.notify_changed()
+        pump(root)
+        assert win._list.count == 1

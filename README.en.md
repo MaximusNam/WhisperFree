@@ -394,6 +394,12 @@ Hence the rules:
 
 - **Script changed and the sound matches** — replacement. "докер" is not a
   Russian word, so replacing it with `Docker` is right in any sentence.
+- **Script changed, the sound did not match** — depends on the direction.
+  Latin letters you replaced with Russian words were invented by the recogniser
+  itself: "на ноге В3" came out as "на Gb3" four times for me. That cannot be a
+  translation, so it is learned as a hint — and never becomes a replacement.
+  The other way round — a Russian word turned into an English one that sounds
+  different, "встреча" → `meeting` — is a translation and is not learned.
 - **A capital inside the word** ("Github" → `GitHub`) — replacement: that
   capital belongs to the term itself. A capital only at the start is the letter
   after a full stop, and it never becomes a rule, or the word would start
@@ -408,7 +414,21 @@ Hence the rules:
 - **A whole phrase rewritten**, or more than five replacements at once — nothing
   is learned: that is a new text, not a correction.
 
-**Visible and reversible.** The plate reports what was learned immediately.
+**A second way, without selecting.** The "Learned corrections" tray item opens
+a window with a "Corrected text" box at the top. Paste the corrected dictation
+there and press "Отправить правку" or Ctrl+Enter — the result appears right
+there, in full. Ctrl+V in that box works on any keyboard layout: Tk matches
+shortcuts by the typed character, so on a Russian layout its own paste stays
+silent, and the box listens to the key code instead. This path helps when the
+window you edited the text in does not hand its selection over on Ctrl+C.
+
+If the hotkey did not take a correction, the plate just says "не запомнил" and
+that same window opens next to it: the reason is shown in full, and the selected
+text is already in the box, ready to be fixed and sent again. The plate itself
+holds about 19 characters; the explanation used to end up as "не запомнил: разно…".
+
+**Visible and reversible.** The plate reports what was learned immediately, and
+opens the window with the reason when nothing was.
 The tray item opens the list: what was heard, what it should be, which stage got
 it wrong, and how the correction is applied. There is a hotkey for that list too,
 off by default — combos are not suppressed, so they reach both the program and

@@ -1607,6 +1607,10 @@ class TestLearningFromCorrections:
         monkeypatch.setattr(
             inject_mod, "copy_selection", lambda **kwargs: (selection, "")
         )
+        # Настоящее окно правок открылось бы через after уже в ЧУЖОМ тесте:
+        # корень Tk в тестах один на весь прогон.
+        if not isinstance(app.lexicon_window, FakeLexiconWindow):
+            app.lexicon_window = FakeLexiconWindow()
         app._learn_now(0)
 
     def test_correction_is_matched_against_history_and_learned(
@@ -1732,3 +1736,97 @@ class TestTapIsNotADictation:
         held = app.cfg.audio.min_seconds - 0.05
         release(app, speech(2.0), held=held)
         assert app.injector.pasted == [], "судили по длине записи, а не по удержанию"
+
+
+class FakeLexiconWindow:
+    """Окно правок без окна: запоминает, что ему велели показать."""
+
+    def __init__(self):
+        self.attempts = []
+        self.changed = 0
+
+    def show_attempt(self, text, outcome):
+        self.attempts.append((text, outcome))
+
+    def notify_changed(self):
+        self.changed += 1
+
+    def apply_font(self):
+        pass
+
+
+class TestTwoWaysToSendACorrection:
+    """Правку присылают хоткеем по выделенному или полем в окне правок.
+
+    Живой случай 23.09: хоткей трижды отвечал «не запомнил: разно…» — причина
+    не помещалась на плашку, — и человек попросил второй путь: вставить текст
+    в окно и нажать «Отправить правку».
+    """
+
+    def dictate(self, app, text):
+        app.provider = FakeProvider(text)
+        app._process(job(app))
+        return app.injector.pasted[-1]
+
+    def hotkey(self, app, monkeypatch, selection):
+        from whisperfree import inject as inject_mod
+
+        monkeypatch.setattr(inject_mod, "copy_selection", lambda **kwargs: (selection, ""))
+        app.lexicon_window = FakeLexiconWindow()
+        app.overlay = FakeOverlay()
+        app._learn_now(0)
+
+    def test_pasted_text_teaches_like_a_selection(self, app):
+        pasted = self.dictate(app, "поднял редис вчера")
+        outcome = app._learn_text(pasted.replace("редис", "Redis"))
+        assert outcome.ok, outcome.full(str)
+        assert [item.right for item in app.lexicon.lessons] == ["Redis"]
+
+    def test_latin_garbage_is_learned_through_the_whole_path(self, app):
+        # Тот самый случай: «на ноге В3» распознано как «на Gb3».
+        self.dictate(app, "Почему на Gb3 в 11 часов не было монет?")
+        outcome = app._learn_text("Почему на ноге В3 в 11 часов не было монет?")
+        assert outcome.ok, outcome.full(str)
+        assert [(item.wrong, item.right) for item in app.lexicon.lessons] == [("Gb3", "ноге В3")]
+        # Подсказка доходит до затравки распознавания, а заменой не становится.
+        self.dictate(app, "ещё одна диктовка")
+        assert "ноге В3" in app.provider.requests[-1].prompt
+        assert app.lexicon.replacements() == {}
+
+    def test_a_text_from_nowhere_says_where_it_looked(self, app):
+        from whisperfree import lexicon as lexicon_mod
+
+        self.dictate(app, "поднял редис вчера")
+        outcome = app._learn_text("совсем другой разговор о погоде на завтра и послезавтра")
+        assert not outcome.ok
+        assert "не нашёл" in outcome.problem.lower()
+        assert str(lexicon_mod.LEARN_DEPTH) in outcome.problem
+
+    def test_an_empty_text_is_refused_plainly(self, app):
+        assert "пуст" in app._learn_text("   ").problem.lower()
+
+    def test_switched_off_learning_says_so_in_the_window(self, app):
+        app.cfg.lexicon.enabled = False
+        assert "выключено" in app._learn_text("что угодно").problem
+
+    def test_a_refused_hotkey_correction_opens_the_window_with_the_text(
+        self, app, monkeypatch
+    ):
+        pasted = self.dictate(app, "поднял редис вчера")
+        rewording = pasted.replace("вчера", "сегодня")
+        self.hotkey(app, monkeypatch, rewording)
+
+        assert app.lexicon.lessons == []
+        # Плашка коротко, окно — целиком и с текстом в поле.
+        assert app.overlay.calls[-1] == ("error", "не запомнил")
+        assert [text for text, _ in app.lexicon_window.attempts] == [rewording]
+        _, outcome = app.lexicon_window.attempts[0]
+        assert "мало похоже" in outcome.full(str)
+
+    def test_a_learned_hotkey_correction_does_not_open_the_window(self, app, monkeypatch):
+        pasted = self.dictate(app, "поднял редис вчера")
+        self.hotkey(app, monkeypatch, pasted.replace("редис", "Redis"))
+
+        assert app.lexicon_window.attempts == []
+        assert app.lexicon_window.changed == 1, "открытое окно правок не узнало о новой"
+        assert app.overlay.calls[-1] == ("ok", "выучил: редис → Redis")

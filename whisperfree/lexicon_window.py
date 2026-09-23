@@ -5,6 +5,12 @@
 не то, к чему стремиться. Поэтому здесь видно каждую выученную правку, на
 каком шаге она возникла и как применяется, и любую можно забыть.
 
+Здесь же второй путь прислать правку: вставить исправленный текст в поле и
+нажать «Отправить правку». Первый путь — хоткей по выделенному тексту —
+зависит от того, отдаст ли чужое окно выделение по Ctrl+C, и о неудаче
+может сказать только плашкой в 19 знаков. Поле ни от чего такого не зависит,
+а итог показывает целиком.
+
 Список блоками, а не таблицей из пяти колонок. Замер: при шрифте 13 колонки
 требуют 857 пикселей, при 15 — уже 971, а человек, которому мелко, поднимет
 шрифт и выше. Значения начали бы обрезаться — в окне, вся суть которого в
@@ -14,13 +20,15 @@
 from __future__ import annotations
 
 import logging
+import threading
 import tkinter as tk
+import tkinter.font as tkfont
 from tkinter import ttk
 from typing import Callable
 
 from . import uifont
 from .blocklist import Block, BlockList
-from .lexicon import DICTIONARY, REFINE, Lesson, Lexicon
+from .lexicon import DICTIONARY, REFINE, LearnOutcome, Lesson, Lexicon
 
 log = logging.getLogger(__name__)
 
@@ -32,6 +40,27 @@ FOOTNOTE = (
     "наверняка — её программа создаёт только там, где правило верно в любом "
     "предложении: другой алфавит или заглавная внутри слова."
 )
+
+# Подсказка над полем для второго пути.
+SEND_HINT = (
+    "Вставьте исправленный текст диктовки целиком (Ctrl+V) и нажмите "
+    "«Отправить правку» или Ctrl+Enter. Программа сравнит его со своей "
+    "диктовкой и запомнит разницу."
+)
+
+# Наименьшая высота окна в строках шрифта. Выросла с 15, когда появилось поле
+# для исправленного текста: подсказка, три строки поля, кнопка и итог.
+WINDOW_LINES = 24
+
+# Цвета итога попытки: удалось, не удалось, идёт сравнение.
+RESULT_OK = "#2e7d32"
+RESULT_FAIL = "#c0392b"
+RESULT_BUSY = "#555555"
+
+# Сочетания в поле по КОДУ клавиши, а не по символу — см. _keys_by_code.
+# Коды виртуальных клавиш Windows: V, C, X, Z.
+CODE_EVENTS = {86: "<<Paste>>", 67: "<<Copy>>", 88: "<<Cut>>", 90: "<<Undo>>"}
+CODE_SELECT_ALL = 65  # A
 
 # Виновника видно и словами, и цветом. Красным — правило из вашего же
 # конфига: это единственный случай, который вы можете поправить сами.
@@ -48,9 +77,13 @@ class LexiconWindow:
         lexicon: Lexicon,
         on_change: Callable[[], None] | None = None,
         on_font: Callable[[int], None] | None = None,
+        on_submit: Callable[[str], LearnOutcome] | None = None,
     ) -> None:
         self.root = root
         self.lexicon = lexicon
+        # Второй путь обучения: текст из поля уходит сюда, а итог
+        # возвращается в окно. Зовётся не из потока Tk — см. _submit.
+        self.on_submit = on_submit
         # Забыв правку, надо сразу перестроить словарь замен и затравки:
         # иначе выброшенное правило доживёт до перезапуска.
         self.on_change = on_change or (lambda: None)
@@ -59,6 +92,9 @@ class LexiconWindow:
         self._list: BlockList | None = None
         self._status: ttk.Label | None = None
         self._note: ttk.Label | None = None
+        self._box: tk.Text | None = None
+        self._send: ttk.Button | None = None
+        self._result: ttk.Label | None = None
         self._rows: list[Lesson] = []
 
     def open(self) -> None:
@@ -77,31 +113,25 @@ class LexiconWindow:
 
         win = tk.Toplevel(self.root)
         win.title("WhisperFree — выученные правки")
-        win.geometry("760x540")
+        win.geometry("760x660")
         win.protocol("WM_DELETE_WINDOW", self._close)
 
         top = ttk.Frame(win, padding=(10, 10, 10, 6))
-        top.pack(fill="x")
+        top.pack(side="top", fill="x")
         # Кнопки размера упаковываем ПЕРВЫМИ: место менеджер отдаёт в порядке
         # вызова, и длинная подпись при крупном шрифте забирала его целиком —
         # «А+» переставала быть видна ровно тогда, когда нужнее всего.
         uifont.zoom_buttons(top, self._zoom)
         ttk.Label(top, text="Выучено из ваших правок").pack(side="left")
 
-        listing = BlockList(win, on_activate=lambda _index: self._forget_selected())
-        listing.tone("refine", foreground=REFINE_COLOR)
-        listing.tone("dictionary", foreground=DICTIONARY_COLOR)
-        listing.frame.pack(fill="both", expand=True, padx=10, pady=(0, 6))
-        listing.text.bind("<Delete>", lambda _e: self._forget_selected())
+        self._build_send(win)
 
-        note = ttk.Label(win, text=FOOTNOTE, foreground="#555555", justify="left")
-        note.pack(fill="x", padx=10, pady=(0, 4))
-        # Пояснение обязано переноситься по ширине окна, а не по числу,
-        # записанному однажды: окно растягивают, и шрифт в нём меняется.
-        note.bind("<Configure>", lambda e: self._wrap_note(e.width))
-
+        # Низ окна пакуем ДО списка и прижимаем к низу. Место менеджер отдаёт
+        # в порядке упаковки, и при крупном шрифте без места остаётся то, что
+        # упаковано последним. Пусть это будет список — он прокручивается, —
+        # а не кнопки «Забыть».
         bottom = ttk.Frame(win, padding=(10, 0, 10, 10))
-        bottom.pack(fill="x")
+        bottom.pack(side="bottom", fill="x")
         ttk.Button(bottom, text="Забыть", command=self._forget_selected).pack(side="left")
         ttk.Button(bottom, text="Забыть всё", command=self._forget_all).pack(
             side="left", padx=6
@@ -109,13 +139,155 @@ class LexiconWindow:
         self._status = ttk.Label(bottom, text="")
         self._status.pack(side="right")
 
+        note = ttk.Label(win, text=FOOTNOTE, foreground="#555555", justify="left")
+        note.pack(side="bottom", fill="x", padx=10, pady=(0, 4))
+        # Пояснение обязано переноситься по ширине окна, а не по числу,
+        # записанному однажды: окно растягивают, и шрифт в нём меняется.
+        note.bind("<Configure>", lambda e: self._wrap_note(e.width))
+
+        listing = BlockList(win, on_activate=lambda _index: self._forget_selected())
+        listing.tone("refine", foreground=REFINE_COLOR)
+        listing.tone("dictionary", foreground=DICTIONARY_COLOR)
+        listing.frame.pack(side="top", fill="both", expand=True, padx=10, pady=(0, 6))
+        listing.text.bind("<Delete>", lambda _e: self._forget_selected())
+
         uifont.bind_zoom(win, self._zoom)
 
         self._window = win
         self._list = listing
         self._note = note
-        uifont.fit_window(win, chars=40, lines=15)
+        uifont.fit_window(win, chars=40, lines=WINDOW_LINES)
         self._refresh()
+
+    def _build_send(self, win: tk.Misc) -> None:
+        """Раздел «Исправленный текст»: поле, кнопка и итог попытки."""
+        send = ttk.LabelFrame(win, text="Исправленный текст", padding=(10, 4, 10, 8))
+        send.pack(side="top", fill="x", padx=10, pady=(0, 8))
+
+        hint = ttk.Label(send, text=SEND_HINT, foreground="#555555", justify="left")
+        hint.pack(fill="x")
+        hint.bind("<Configure>", lambda e: _wrap(e.widget, e.width))
+
+        # Шрифт задаём явно: tk.Text по умолчанию берёт TkFixedFont — Courier
+        # New 10, — и поле осталось бы мелким посреди крупного окна.
+        box = tk.Text(
+            send,
+            height=3,
+            wrap="word",
+            undo=True,
+            font=tkfont.nametofont("TkTextFont"),
+            borderwidth=1,
+            relief="solid",
+            highlightthickness=0,
+        )
+        box.pack(fill="x", pady=(4, 6))
+        box.bind("<Control-KeyPress>", self._keys_by_code)
+        box.bind("<Control-Return>", lambda _e: self._submit() or "break")
+
+        row = ttk.Frame(send)
+        row.pack(fill="x")
+        button = ttk.Button(row, text="Отправить правку", command=self._submit)
+        button.pack(side="left")
+
+        result = ttk.Label(send, text="", justify="left")
+        result.pack(fill="x", pady=(6, 0))
+        result.bind("<Configure>", lambda e: _wrap(e.widget, e.width))
+
+        self._box = box
+        self._send = button
+        self._result = result
+
+    # --- второй путь: поле «Исправленный текст» ---------------------------------
+
+    @staticmethod
+    def _keys_by_code(event) -> str | None:
+        """Ctrl+V, Ctrl+C, Ctrl+X, Ctrl+Z и Ctrl+A — по коду клавиши.
+
+        Tk сопоставляет сочетания по СИМВОЛУ раскладки: на русской физическая
+        V даёт «м», и его собственная привязка <Control-v> молчит. Вставить
+        текст в поле было бы нельзя ровно тем способом, каким вставляют все.
+        Проверено 05.09 на Ctrl+C в окне Tk: на английской раскладке
+        копируется, на русской — нет. Код клавиши от раскладки не зависит.
+
+        «break» обязателен: на английской раскладке иначе сработала бы ещё и
+        привязка самого Tk, и текст вставился бы дважды.
+        """
+        action = CODE_EVENTS.get(event.keycode)
+        if action is not None:
+            event.widget.event_generate(action)
+            return "break"
+        if event.keycode == CODE_SELECT_ALL:
+            event.widget.tag_add("sel", "1.0", "end-1c")
+            return "break"
+        return None
+
+    def _submit(self) -> None:
+        box = self._box
+        if box is None or not box.winfo_exists():
+            return
+        text = box.get("1.0", "end-1c").strip()
+        if not text:
+            self._show_result("Поле пустое — вставьте исправленный текст.", ok=False)
+            return
+        if self.on_submit is None:
+            self._show_result("Отправлять некуда: окно открыто без программы.", ok=False)
+            return
+
+        if self._send is not None and self._send.winfo_exists():
+            self._send.state(["disabled"])
+        self._show_result("Сравниваю с диктовками…", ok=None)
+        submit = self.on_submit
+
+        def work() -> None:
+            # Не в потоке Tk: поиск по истории и запись файла правок занимают
+            # десятки миллисекунд, а в потоке Tk живёт насос плашки.
+            try:
+                outcome = submit(text)
+            except Exception:
+                log.exception("не удалось отправить правку из окна")
+                outcome = LearnOutcome(problem="Не получилось: ошибка, подробности в логе.")
+            self.root.after(0, lambda: self._finish_submit(outcome))
+
+        threading.Thread(target=work, name="lexicon-submit", daemon=True).start()
+
+    def _finish_submit(self, outcome: LearnOutcome) -> None:
+        if self._send is not None and self._send.winfo_exists():
+            self._send.state(["!disabled"])
+        self._show_result(outcome.full(self.lexicon.describe), ok=outcome.ok)
+        if outcome.ok and self._box is not None and self._box.winfo_exists():
+            # Выученное поле больше не нужно. Невыученное оставляем: его
+            # поправят и отправят снова.
+            self._box.delete("1.0", "end")
+        self._refresh()
+
+    def _show_result(self, text: str, ok: bool | None) -> None:
+        result = self._result
+        if result is None or not result.winfo_exists():
+            return
+        color = RESULT_BUSY if ok is None else (RESULT_OK if ok else RESULT_FAIL)
+        result.configure(text=text, foreground=color)
+
+    def show_attempt(self, text: str, outcome: LearnOutcome) -> None:
+        """Открыть окно с неудавшейся попыткой хоткея. Можно звать из любого потока.
+
+        На плашке причина отказа не помещается — там около 19 знаков. Здесь
+        она видна целиком, а выделенный текст уже стоит в поле: его можно
+        поправить и отправить снова, не выделяя заново.
+        """
+
+        def run() -> None:
+            self._open()
+            box = self._box
+            if box is not None and box.winfo_exists():
+                box.delete("1.0", "end")
+                box.insert("1.0", text)
+            self._show_result(outcome.full(self.lexicon.describe), ok=outcome.ok)
+
+        self.root.after(0, run)
+
+    def notify_changed(self) -> None:
+        """Список изменился не отсюда — правку выучили хоткеем. Любой поток."""
+        self.root.after(0, self._refresh)
 
     def _close(self) -> None:
         if self._window is not None:
@@ -221,7 +393,13 @@ class LexiconWindow:
         if self._list is not None and self._list.text.winfo_exists():
             self._list.apply_font()
         if self._window is not None and self._window.winfo_exists():
-            uifont.fit_window(self._window, chars=40, lines=15)
+            uifont.fit_window(self._window, chars=40, lines=WINDOW_LINES)
+
+
+def _wrap(label: ttk.Label, width: int) -> None:
+    """Подпись переносится по ширине окна, а не по числу из кода."""
+    if label.winfo_exists():
+        label.configure(wraplength=max(200, int(width) - 8))
 
 
 def _times(count: int) -> str:

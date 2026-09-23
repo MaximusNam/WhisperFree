@@ -25,7 +25,7 @@ import logging
 import re
 import threading
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from .refine import similarity, translit
@@ -181,10 +181,20 @@ def learnable(wrong: str, right: str) -> tuple[bool, str]:
     if case_only(wrong, right):
         return True, ""
     if changes_script(wrong, right):
-        # Смена алфавита без совпадения по звучанию — это перевод, а не
-        # ошибка распознавания: «встреча» → «meeting» запоминать нельзя.
         if same_sound(wrong, right):
             return True, ""
+        # Латиницу, которую человек заменил русскими словами, выдумало само
+        # распознавание: диктуют по-русски, и переводом такая правка быть не
+        # может. Живой случай: «на ноге В3» Whisper четырежды записал как
+        # «на Gb3» (01.09, 19.09, 21.09, 23.09), и каждую правку отклоняли как
+        # перевод — звучание ведь не сходится. Не сходится оно потому, что
+        # Whisper услышал, как услышал. Берём такую пару подсказкой: правилом
+        # замены она не станет никогда — can_be_rule требует совпадения по
+        # звучанию.
+        if not LATIN.search(right):
+            return True, ""
+        # Обратное направление — кириллица в латиницу с другим звучанием — это
+        # перевод: «встреча» → «meeting». Его запоминать нельзя.
         return False, "разное звучание — похоже на перевод, а не на ошибку слуха"
 
     # Один алфавит. Опечатку («сожелению» → «сожалению») от смены слова
@@ -364,6 +374,64 @@ def _both_scores(haystack: str, needle: str) -> float:
         return whole
     solid = sum(block.size for block in blocks if block.size >= MIN_BLOCK)
     return max(whole, solid / len(needle))
+
+
+# --- итог попытки ---------------------------------------------------------------
+
+# Среди скольких последних диктовок искать ту, которую человек поправил. Одно
+# число на оба пути — хоткей и поле в окне правок: иначе один и тот же текст
+# находился бы одним путём и не находился другим.
+LEARN_DEPTH = 30
+
+
+@dataclass
+class LearnOutcome:
+    """Итог одной попытки запомнить правку — для плашки и для окна.
+
+    Путей два: хоткей по выделенному тексту и поле в окне правок. У итога
+    два вида, потому что на плашке помещается около 19 знаков: от «не
+    запомнил: разное звучание — похоже на перевод» там оставалось «не
+    запомнил: разно…», и человек, трижды нажав хоткей, так и не узнал, почему
+    правку не взяли. Короткий вид — для плашки, полный — для окна.
+    """
+
+    learned: list = field(default_factory=list)
+    refused: list[str] = field(default_factory=list)
+    # Почему до сравнения дело не дошло: текст пустой, диктовка не найдена,
+    # обучение выключено.
+    problem: str = ""
+
+    @property
+    def ok(self) -> bool:
+        return bool(self.learned)
+
+    def short(self) -> str:
+        """Для плашки. Неудачу не объясняем: объяснение там не поместится."""
+        if not self.learned:
+            return "не запомнил"
+        first = f"{self.learned[0].wrong} → {self.learned[0].right}"
+        if len(self.learned) == 1:
+            return f"выучил: {first}"
+        return f"выучил {len(self.learned)}: {first}"
+
+    def full(self, describe) -> str:
+        """Для окна: всё, что человеку нужно знать, без обрезки.
+
+        describe — Lexicon.describe: он знает, подсказкой стала правка или
+        заменой, а сам итог о пороге повторов ничего не знает.
+        """
+        lines: list[str] = []
+        if self.problem:
+            lines.append(self.problem)
+        if self.learned:
+            lines.append("Запомнил:")
+            lines.extend(f"    {describe(lesson)}" for lesson in self.learned)
+        if self.refused:
+            lines.append("Не запомнил:" if not self.learned else "Остальное не запомнил:")
+            lines.extend(f"    {line}" for line in self.refused)
+        if not lines:
+            lines.append("Отличий от диктовки нет — в тексте ничего не исправлено.")
+        return "\n".join(lines)
 
 
 # --- хранение ------------------------------------------------------------------
