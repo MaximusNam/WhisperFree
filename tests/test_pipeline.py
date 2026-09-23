@@ -831,11 +831,18 @@ class TestThePlateBelongsToTheCurrentDictation:
     не ту плашку.
     """
 
-    @staticmethod
-    def press(app) -> None:
+    # Сколько «держали» клавишу в этих тестах. Отпускание судит о касании по
+    # времени удержания, а тесты жмут и отпускают за микросекунды: без отката
+    # времени нажатия каждая их диктовка выглядела бы случайным касанием.
+    HELD = 3.0
+
+    @classmethod
+    def press(cls, app) -> None:
         """Нажатие клавиши диктовки на здоровом микрофоне."""
         app.recorder = FakeRecorder(capture=speech())
         app._start_dictation(app.cfg.language.main)
+        # Будто клавишу нажали HELD секунд назад — столько же длится speech().
+        app._press_at = time.monotonic() - cls.HELD
 
     @classmethod
     def dictate(cls, app):
@@ -1442,7 +1449,12 @@ class TestFailuresLeaveATrace:
     def test_a_short_tap_leaves_no_trace(self, app):
         # Случайных касаний бывает много; в истории они были бы мусором,
         # в котором не найти настоящую неудачу.
-        release(app, silence(seconds=0.1))
+        # Касание — это КОРОТКОЕ УДЕРЖАНИЕ. Раньше тест изображал его короткой
+        # записью при удержании по умолчанию в 3 с, и проходил, потому что
+        # решала длина записи. Короткая запись при долгом удержании в жизни
+        # бывает только у мёртвого потока, и для него своя ветка. Теперь решает
+        # время удержания — см. TestTapIsNotADictation.
+        release(app, silence(seconds=0.1), held=0.1)
 
         assert app.history.last() is None
         assert app._jobs.empty()
@@ -1687,3 +1699,36 @@ class TestLearningFromCorrections:
             app, monkeypatch, app.injector.pasted[-1].replace("докер", "Docker")
         )
         assert app.lexicon.lessons == []
+
+
+
+class TestTapIsNotADictation:
+    """Касание клавиши — не диктовка, даже если запись вместе с предзаписью
+    длиннее порога.
+
+    Живой случай 14.09: человек проверял, появится ли плашка, короткими
+    касаниями по десятой доле секунды. Записи вместе с предзаписью — 250 мс
+    звука ДО нажатия — выходили по 0.35–0.38 с, проходили порог min_seconds =
+    0.35 по ДЛИНЕ ЗАПИСИ и уходили на распознавание, каждое оплаченным
+    запросом. Whisper на щелчке клавиши выдавал «Пока!», и оно дважды
+    вставилось в окно Claude.
+    """
+
+    def test_a_short_tap_with_preroll_is_ignored(self, app):
+        before = len(app.history.records)
+        release(app, speech(0.38), held=0.1)
+        assert app.injector.pasted == [], "касание вставило текст в окно"
+        # Не пишем в историю и не шлём запрос: диктовки не было.
+        assert len(app.history.records) == before, "касание попало в историю"
+
+    def test_a_real_hold_of_the_same_length_is_dictated(self, app):
+        # Та же запись, но клавишу держали по-настоящему.
+        release(app, speech(0.38), held=0.6)
+        assert app.injector.pasted, "настоящее удержание не дошло до вставки"
+
+    def test_the_decision_is_made_by_hold_time_not_capture_length(self, app):
+        """Разводим два признака, чтобы тест не прошёл случайно: запись
+        длинная, удержание короче порога. Решать обязано удержание."""
+        held = app.cfg.audio.min_seconds - 0.05
+        release(app, speech(2.0), held=held)
+        assert app.injector.pasted == [], "судили по длине записи, а не по удержанию"
