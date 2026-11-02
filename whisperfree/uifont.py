@@ -83,11 +83,17 @@ def min_window(root: tk.Misc, chars: int, lines: int) -> tuple[int, int]:
     width = int(font.measure("0") * chars)
     height = int(font.metrics("linespace") * lines)
     try:
-        width = min(width, root.winfo_screenwidth() - 80)
-        height = min(height, root.winfo_screenheight() - 120)
+        width = min(width, root.winfo_screenwidth() - SCREEN_SPARE_W)
+        height = min(height, root.winfo_screenheight() - SCREEN_SPARE_H)
     except tk.TclError:  # pragma: no cover
         pass
     return max(320, width), max(200, height)
+
+
+# Сколько экрана окно оставляет свободным: под панель задач, заголовок окна и
+# чтобы было за что ухватиться и передвинуть.
+SCREEN_SPARE_W = 80
+SCREEN_SPARE_H = 120
 
 
 def fit_window(window: tk.Misc, chars: int, lines: int) -> None:
@@ -95,8 +101,21 @@ def fit_window(window: tk.Misc, chars: int, lines: int) -> None:
     width, height = min_window(window, chars, lines)
     window.minsize(width, height)
     try:
-        if window.winfo_width() < width or window.winfo_height() < height:
-            window.geometry(f"{max(width, window.winfo_width())}x{max(height, window.winfo_height())}")
+        current_w, current_h = window.winfo_width(), window.winfo_height()
+        # Ещё не показанное окно имеет размер 1×1, и без этой ветки размер,
+        # заданный ему при создании, затирался наименьшим: при шрифте 16 окно
+        # правок открывалось в 440 пикселей вместо 760. Обработка отложенных
+        # задач показывает окно в заданном размере. Его же ограничиваем
+        # экраном: 760×660 на экране 1280×720 (1920×1080 при 150 %) уводит
+        # кнопки «Забыть» под панель задач. Уже показанное окно не трогаем —
+        # его размер выбрал человек.
+        if not window.winfo_ismapped():
+            window.update_idletasks()
+            current_w = min(window.winfo_width(), window.winfo_screenwidth() - SCREEN_SPARE_W)
+            current_h = min(window.winfo_height(), window.winfo_screenheight() - SCREEN_SPARE_H)
+        target_w, target_h = max(width, current_w), max(height, current_h)
+        if (target_w, target_h) != (window.winfo_width(), window.winfo_height()):
+            window.geometry(f"{target_w}x{target_h}")
     except tk.TclError:  # pragma: no cover
         pass
 

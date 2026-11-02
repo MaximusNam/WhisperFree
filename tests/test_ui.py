@@ -649,7 +649,7 @@ def block_lines(listing, index: int) -> int:
     )
 
 
-def hidden_controls(window) -> list[str]:
+def hidden_controls(window, optional=()) -> list[str]:
     """Подписи и кнопки, которых в окне не видно.
 
     Сдавленная разметка выглядит для человека точно так же, как обрезанный
@@ -657,22 +657,39 @@ def hidden_controls(window) -> list[str]:
     Проверка не декоративная — при размере по умолчанию 13 кнопок «Вставить»
     и «Копировать» не было видно вовсе, потому что tk.Text просит по
     умолчанию 24 строки высоты и съедал окно целиком.
+
+    optional — части, которых в окне может не быть вовсе: пояснения,
+    уступающие место списку, и итог попытки, пока сказать нечего. Такая часть
+    может быть убрана целиком, но не сдавлена: обрезанный по высоте текст и
+    есть та поломка, которую здесь ловят.
+
+    Сдавленной считается часть ниже своей запрошенной высоты, а не ниже
+    четырёх пикселей, как раньше: кнопка «Забыть» в 16 пикселей из 60
+    проходила прежнюю проверку, хотя прочитать на ней было нечего.
     """
     missing = []
+    absent_ok = {str(widget) for widget in optional}
 
     def walk(widget):
         for child in widget.winfo_children():
-            if child.winfo_class() in ("TButton", "TLabel", "TEntry"):
+            if str(child) in absent_ok and not child.winfo_manager():
+                continue
+            if child.winfo_class() in ("TButton", "TLabel", "TEntry", "Text"):
                 try:
                     label = str(child.cget("text"))[:16]
                 except tk.TclError:  # pragma: no cover
                     label = ""
-                if not child.winfo_ismapped() or child.winfo_height() < 4:
+                if not child.winfo_ismapped() or child.winfo_height() < child.winfo_reqheight():
                     missing.append(label or child.winfo_class())
             walk(child)
 
     walk(window)
     return missing
+
+
+def shown_result(win) -> str:
+    """Итог попытки в окне правок — как его видит человек."""
+    return win._result.get("1.0", "end-1c")
 
 
 class TestBlockList:
@@ -920,6 +937,49 @@ class TestWindowFitsItsFont:
             assert big[0] > small[0] and big[1] > small[1]
         finally:
             uifont.apply_size(root, was)
+
+    def test_a_new_window_keeps_the_size_it_asked_for(self, root):
+        """Ещё не показанное окно имеет размер 1×1. fit_window принимал это за
+        «меньше наименьшего» и затирал заданный размер наименьшим: окно правок
+        вместо 760 пикселей открывалось в 440, и пояснения в нём разъезжались
+        на столько строк, что списку не оставалось места."""
+        from whisperfree import uifont
+
+        window = tk.Toplevel(root)
+        window.geometry("760x660+4000+4000")
+        uifont.fit_window(window, chars=10, lines=5)
+        window.update_idletasks()
+        assert (window.winfo_width(), window.winfo_height()) == (760, 660)
+
+    def test_a_new_window_is_no_bigger_than_the_screen(self, root, monkeypatch):
+        """Экран 1920×1080 при масштабе 150 % — это 1280×720 логических
+        пикселей. Окно правок в 660 пикселей уводило бы кнопки «Забыть» под
+        панель задач; оставляем экрану те же 120 пикселей, что min_window."""
+        from whisperfree import uifont
+
+        monkeypatch.setattr(tk.Misc, "winfo_screenwidth", lambda self: 1280)
+        monkeypatch.setattr(tk.Misc, "winfo_screenheight", lambda self: 720)
+        window = tk.Toplevel(root)
+        window.geometry("760x660+4000+4000")
+        uifont.fit_window(window, chars=10, lines=5)
+        window.update_idletasks()
+        assert (window.winfo_width(), window.winfo_height()) == (760, 720 - uifont.SCREEN_SPARE_H)
+
+    def test_a_window_the_person_enlarged_is_left_alone(self, root, monkeypatch):
+        """Ограничение экраном — только для нового окна. Растянутое человеком
+        окно смена шрифта ужимать не должна."""
+        from whisperfree import uifont
+
+        monkeypatch.setattr(tk.Misc, "winfo_screenwidth", lambda self: 1280)
+        monkeypatch.setattr(tk.Misc, "winfo_screenheight", lambda self: 720)
+        window = tk.Toplevel(root)
+        window.geometry("760x500+4000+4000")
+        window.update_idletasks()
+        window.geometry("760x700")
+        window.update_idletasks()
+        uifont.fit_window(window, chars=10, lines=5)
+        window.update_idletasks()
+        assert window.winfo_height() == 700
 
     def test_minimum_size_never_exceeds_the_screen(self, root):
         from whisperfree import uifont
@@ -1185,20 +1245,141 @@ class TestLexiconWindow:
         # Слишком узкое окно не должно давать бессмысленный перенос.
         assert int(win._note.cget("wraplength")) == 200
 
-    def test_every_control_stays_visible_at_any_size(self, root, lex):
+    # Экран раннера GitHub — 1024×768. На нём с 23.09 падал тест ниже: при
+    # шрифте 28 из окна выпадали кнопки «Забыть», — а на экране разработчика
+    # тот же тест проходил. Экран подменяем, чтобы оба случая проверялись на
+    # любой машине, а не только там, где повезёт с монитором.
+    SCREENS = {"1024x768": (1024, 768), "2560x1440": (2560, 1440)}
+    SIZES = (8, 9, 13, 16, 20, 24, 28)
+
+    @pytest.fixture(params=list(SCREENS))
+    def screen(self, request, monkeypatch):
+        width, height = self.SCREENS[request.param]
+        monkeypatch.setattr(tk.Misc, "winfo_screenwidth", lambda self: width)
+        monkeypatch.setattr(tk.Misc, "winfo_screenheight", lambda self: height)
+        return width, height
+
+    @staticmethod
+    def resize_font(root, win, size):
+        from whisperfree import uifont
+
+        uifont.apply_size(root, size)
+        win.apply_font()
+        win._refresh()
+        pump(root)
+
+    def test_every_control_stays_visible_at_any_size(self, root, lex, screen):
         from whisperfree import uifont
 
         win = self.window(root, lex)
         win._window.geometry("760x540+4000+4000")
-        for size in (uifont.MIN_SIZE, 9, uifont.DEFAULT_SIZE, 20, uifont.MAX_SIZE):
-            uifont.apply_size(root, size)
-            win.apply_font()
-            win._refresh()
-            win._window.update_idletasks()
-            win._window.update()
+        for size in (uifont.MIN_SIZE, *self.SIZES, uifont.MAX_SIZE):
+            self.resize_font(root, win, size)
             # Кнопки размера — последнее, что можно отнять у человека,
             # которому мелко: без них он не вернёт себе читаемый текст.
-            assert hidden_controls(win._window) == [], f"при размере {size}"
+            hidden = hidden_controls(win._window, optional=(win._hint, win._note, win._result_row))
+            assert hidden == [], f"при размере {size}"
+
+    def test_the_list_keeps_its_lines_at_any_size(self, root, lex, screen):
+        """Список — то, ради чего окно открывают. Живой случай 02.11: при
+        шрифте 16 поле для исправленного текста и два пояснения оставляли
+        списку одну строку, и три выученные правки не было видно вовсе."""
+        import tkinter.font as tkfont
+
+        from whisperfree.lexicon_window import LIST_MIN_LINES, _inner_padding
+
+        win = self.window(root, lex)
+        for size in self.SIZES:
+            self.resize_font(root, win, size)
+            line = tkfont.nametofont("TkDefaultFont").metrics("linespace")
+            frame = win._list.frame
+            # Высоту убранного упаковщиком виджета Tk не сбрасывает — без
+            # winfo_ismapped пропавший список прошёл бы с прежней высотой.
+            assert frame.winfo_ismapped(), f"при размере {size}"
+            want = LIST_MIN_LINES * line + _inner_padding(win._list.text)
+            assert frame.winfo_height() >= want, f"при размере {size}"
+
+    # Итог настоящей длины: столько выдаёт окно, когда из одной правки что-то
+    # выучено, а что-то нет.
+    LONG_RESULT = (
+        "Запомнил: редис → Redis, фигма → Figma.\n"
+        "Остальное не запомнил: «гит хаб» → «GitHub» звучит иначе — это перевод, "
+        "а не ошибка распознавания; «пайтест» → «pytest» уже выучено раньше."
+    )
+
+    def test_a_long_result_never_squeezes_the_buttons(self, root, lex, screen):
+        """Раздел с полем растёт вместе с итогом, а окно нет. Пока раздел
+        паковался раньше нижнего ряда, такой итог при шрифте 28 на экране
+        1024×768 сдавливал «Забыть» до 16 пикселей из 60."""
+        win = self.window(root, lex)
+        for size in self.SIZES:
+            self.resize_font(root, win, size)
+            win._show_result(self.LONG_RESULT, ok=True)
+            pump(root)
+            hidden = hidden_controls(win._window, optional=(win._hint, win._note))
+            assert hidden == [], f"при размере {size}"
+
+    def test_every_new_result_makes_room(self, root, lex, screen):
+        """Первым в поле итога идёт однострочное «Сравниваю…», настоящий итог
+        приходит следом. Место пересчитывалось только при первом показе, и
+        при шрифте 16 после отправки списку оставалась строка-другая, а оба
+        пояснения стояли на месте."""
+        import tkinter.font as tkfont
+
+        from whisperfree import uifont
+        from whisperfree.lexicon_window import LIST_MIN_LINES, _inner_padding
+
+        uifont.apply_size(root, 16)
+        win = self.window(root, lex)
+        win._show_result("Сравниваю с диктовками…", ok=None)
+        pump(root)
+        win._show_result(self.LONG_RESULT, ok=True)
+        pump(root)
+        line = tkfont.nametofont("TkDefaultFont").metrics("linespace")
+        frame = win._list.frame
+        assert frame.winfo_ismapped()
+        assert frame.winfo_height() >= LIST_MIN_LINES * line + _inner_padding(win._list.text)
+
+    def test_a_shorter_result_brings_the_explanations_back(self, root, lex, monkeypatch):
+        from whisperfree import uifont
+
+        monkeypatch.setattr(tk.Misc, "winfo_screenwidth", lambda self: 2560)
+        monkeypatch.setattr(tk.Misc, "winfo_screenheight", lambda self: 1440)
+        uifont.apply_size(root, 16)
+        win = self.window(root, lex)
+        win._show_result(self.LONG_RESULT, ok=True)
+        pump(root)
+        assert not win._note.winfo_manager()
+        win._show_result("Запомнил: редис → Redis.", ok=True)
+        pump(root)
+        assert win._note.winfo_manager()
+
+    def test_explanations_stay_at_usual_sizes(self, root, lex, screen):
+        """Уступать место пояснения должны в тесноте, а не всегда: при обычном
+        шрифте человек должен видеть, что делать с полем и чем подсказка
+        отличается от замены."""
+        from whisperfree import uifont
+
+        uifont.apply_size(root, 16)
+        win = self.window(root, lex)
+        assert win._hint.winfo_manager() and win._note.winfo_manager()
+
+    def test_explanations_come_back_when_there_is_room(self, root, lex):
+        from whisperfree import uifont
+
+        uifont.apply_size(root, uifont.DEFAULT_SIZE)
+        win = self.window(root, lex)
+        # Наименьший размер снимаем: проверяется сама уступка, а не он.
+        win._window.minsize(1, 1)
+        win._window.geometry("760x300")
+        pump(root)
+        assert not win._note.winfo_manager() and not win._hint.winfo_manager()
+        win._window.geometry("760x1000")
+        pump(root)
+        assert win._hint.winfo_manager() and win._note.winfo_manager()
+        # Вернулись на свои места, а не в конец окна.
+        assert win._hint.winfo_y() < win._box.winfo_y()
+        assert win._note.winfo_y() < win._status.master.winfo_y()
 
     def test_zoom_asks_the_application(self, root, lex):
         from whisperfree.lexicon_window import LexiconWindow
@@ -1242,7 +1423,7 @@ class TestSendCorrectionFromTheWindow:
         win._submit()
         for _ in range(40):
             pump(root, times=1)
-            if not str(win._result.cget("text")).startswith("Сравниваю"):
+            if not shown_result(win).startswith("Сравниваю"):
                 return
         raise AssertionError("итог отправки так и не появился")
 
@@ -1262,7 +1443,7 @@ class TestSendCorrectionFromTheWindow:
         reason = "«Gb3» → «ноге В3»: разное звучание — похоже на перевод, а не на ошибку слуха"
         win = self.window(root, lex, outcome=LearnOutcome(refused=[reason]))
         self.send(root, win, "Почему на ноге В3 не было монет?")
-        assert reason in win._result.cget("text"), "причину обрезали"
+        assert reason in shown_result(win), "причину обрезали"
 
     def test_a_refused_text_stays_in_the_box(self, root, lex):
         from whisperfree.lexicon import LearnOutcome
@@ -1287,7 +1468,7 @@ class TestSendCorrectionFromTheWindow:
         win._box.delete("1.0", "end")
         win._submit()
         assert seen == [], "пустое поле ушло на сравнение"
-        assert "пустое" in win._result.cget("text")
+        assert "пустое" in shown_result(win)
 
     def test_ctrl_v_works_on_any_layout(self, root, lex):
         """Tk сопоставляет Ctrl+V по символу раскладки, и на русской его
@@ -1324,7 +1505,7 @@ class TestSendCorrectionFromTheWindow:
         pump(root)
         assert win._window is not None and win._window.winfo_exists()
         assert win._box.get("1.0", "end-1c") == "Почему на ноге В3 не было монет?"
-        assert reason in win._result.cget("text")
+        assert reason in shown_result(win)
 
     def test_the_list_follows_a_hotkey_lesson(self, root, lex):
         win = self.window(root, lex)

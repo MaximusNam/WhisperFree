@@ -52,6 +52,26 @@ SEND_HINT = (
 # для исправленного текста: подсказка, три строки поля, кнопка и итог.
 WINDOW_LINES = 24
 
+# Сколько строк список сохраняет всегда: столько, чтобы целиком была видна
+# хотя бы одна правка — строка о ней и сама пара. Ради них окно убирает
+# пояснения, см. _make_room: список — то, ради чего окно открывают. Четыре не
+# помещаются при шрифте 28 на экране 1024×768 даже без пояснений. Исключение
+# одно: итогу только что отправленной правки окно оставляет RESULT_MIN_LINES
+# строк даже за счёт списка.
+LIST_MIN_LINES = 3
+
+# Отступы, которые _make_room складывает с высотами частей окна. Те же числа
+# стоят в pack() ниже; разойдутся — расчёт места начнёт ошибаться на них.
+SEND_PADY = 8
+NOTE_PADY = 4
+LIST_PADY = 6
+NOTE_PADX = 10
+RESULT_PADY = 6
+
+# Меньше этого итогу не дают, даже если места нет совсем: две строки с
+# прокруткой читаются, одна — уже нет.
+RESULT_MIN_LINES = 2
+
 # Цвета итога попытки: удалось, не удалось, идёт сравнение.
 RESULT_OK = "#2e7d32"
 RESULT_FAIL = "#c0392b"
@@ -94,7 +114,14 @@ class LexiconWindow:
         self._note: ttk.Label | None = None
         self._box: tk.Text | None = None
         self._send: ttk.Button | None = None
-        self._result: ttk.Label | None = None
+        self._result: tk.Text | None = None
+        self._result_row: ttk.Frame | None = None
+        self._result_scroll: ttk.Scrollbar | None = None
+        self._hint: ttk.Label | None = None
+        self._send_frame: ttk.LabelFrame | None = None
+        self._top: ttk.Frame | None = None
+        self._bottom: ttk.Frame | None = None
+        self._room_pending = False
         self._rows: list[Lesson] = []
 
     def open(self) -> None:
@@ -124,12 +151,12 @@ class LexiconWindow:
         uifont.zoom_buttons(top, self._zoom)
         ttk.Label(top, text="Выучено из ваших правок").pack(side="left")
 
-        self._build_send(win)
-
-        # Низ окна пакуем ДО списка и прижимаем к низу. Место менеджер отдаёт
-        # в порядке упаковки, и при крупном шрифте без места остаётся то, что
-        # упаковано последним. Пусть это будет список — он прокручивается, —
-        # а не кнопки «Забыть».
+        # Низ окна пакуем сразу за верхом и прижимаем к низу. Место менеджер
+        # отдаёт в порядке упаковки, и при нехватке без него остаётся то, что
+        # упаковано последним: список (он прокручивается), за ним пояснение,
+        # за ним раздел с полем — но не кнопки «Забыть». Пока раздел с полем
+        # паковался раньше низа, длинный итог попытки при шрифте 28 на
+        # экране 1024×768 сдавливал эти кнопки до 16 пикселей из 60.
         bottom = ttk.Frame(win, padding=(10, 0, 10, 10))
         bottom.pack(side="bottom", fill="x")
         ttk.Button(bottom, text="Забыть", command=self._forget_selected).pack(side="left")
@@ -139,8 +166,10 @@ class LexiconWindow:
         self._status = ttk.Label(bottom, text="")
         self._status.pack(side="right")
 
+        self._build_send(win)
+
         note = ttk.Label(win, text=FOOTNOTE, foreground="#555555", justify="left")
-        note.pack(side="bottom", fill="x", padx=10, pady=(0, 4))
+        note.pack(side="bottom", fill="x", padx=NOTE_PADX, pady=(0, NOTE_PADY))
         # Пояснение обязано переноситься по ширине окна, а не по числу,
         # записанному однажды: окно растягивают, и шрифт в нём меняется.
         note.bind("<Configure>", lambda e: self._wrap_note(e.width))
@@ -148,21 +177,25 @@ class LexiconWindow:
         listing = BlockList(win, on_activate=lambda _index: self._forget_selected())
         listing.tone("refine", foreground=REFINE_COLOR)
         listing.tone("dictionary", foreground=DICTIONARY_COLOR)
-        listing.frame.pack(side="top", fill="both", expand=True, padx=10, pady=(0, 6))
+        listing.frame.pack(side="top", fill="both", expand=True, padx=10, pady=(0, LIST_PADY))
         listing.text.bind("<Delete>", lambda _e: self._forget_selected())
 
         uifont.bind_zoom(win, self._zoom)
+        win.bind("<Configure>", self._on_resize, add="+")
 
         self._window = win
         self._list = listing
         self._note = note
+        self._top = top
+        self._bottom = bottom
         uifont.fit_window(win, chars=40, lines=WINDOW_LINES)
         self._refresh()
+        self._make_room()
 
     def _build_send(self, win: tk.Misc) -> None:
         """Раздел «Исправленный текст»: поле, кнопка и итог попытки."""
         send = ttk.LabelFrame(win, text="Исправленный текст", padding=(10, 4, 10, 8))
-        send.pack(side="top", fill="x", padx=10, pady=(0, 8))
+        send.pack(side="top", fill="x", padx=10, pady=(0, SEND_PADY))
 
         hint = ttk.Label(send, text=SEND_HINT, foreground="#555555", justify="left")
         hint.pack(fill="x")
@@ -189,13 +222,42 @@ class LexiconWindow:
         button = ttk.Button(row, text="Отправить правку", command=self._submit)
         button.pack(side="left")
 
-        result = ttk.Label(send, text="", justify="left")
-        result.pack(fill="x", pady=(6, 0))
-        result.bind("<Configure>", lambda e: _wrap(e.widget, e.width))
+        # Итог — поле только для чтения, а не подпись. Подпись не умеет быть
+        # ниже своего текста: длинный итог при шрифте 28 на экране 1024×768
+        # не помещался даже без пояснений и обрезался снизу. Поле получает
+        # столько строк, сколько есть места, и прокручивается, если нужно
+        # больше, — см. _make_room. Заодно причину отказа можно выделить и
+        # скопировать. В окно не пакуем, пока сказать нечего: пустое поле всё
+        # равно берёт строку высоты. Пакует _show_result.
+        result_row = ttk.Frame(send)
+        result = tk.Text(
+            result_row,
+            height=1,
+            width=1,
+            wrap="word",
+            font=tkfont.nametofont("TkDefaultFont"),
+            borderwidth=0,
+            highlightthickness=0,
+            padx=0,
+            pady=0,
+            relief="flat",
+            background=ttk.Style(send).lookup("TLabelframe", "background") or "SystemButtonFace",
+            takefocus=0,
+            cursor="arrow",
+        )
+        result.configure(state="disabled")
+        result.bind("<Control-KeyPress>", self._keys_by_code)
+        scroll = ttk.Scrollbar(result_row, orient="vertical", command=result.yview)
+        result.configure(yscrollcommand=scroll.set)
+        result.pack(side="left", fill="both", expand=True)
 
         self._box = box
         self._send = button
         self._result = result
+        self._result_row = result_row
+        self._result_scroll = scroll
+        self._hint = hint
+        self._send_frame = send
 
     # --- второй путь: поле «Исправленный текст» ---------------------------------
 
@@ -265,7 +327,17 @@ class LexiconWindow:
         if result is None or not result.winfo_exists():
             return
         color = RESULT_BUSY if ok is None else (RESULT_OK if ok else RESULT_FAIL)
-        result.configure(text=text, foreground=color)
+        result.configure(state="normal", foreground=color)
+        result.delete("1.0", "end")
+        result.insert("1.0", text)
+        result.configure(state="disabled")
+        if not self._result_row.winfo_manager():
+            self._result_row.pack(fill="x", pady=(RESULT_PADY, 0))
+        # С каждым итогом раздел меняет высоту, а окно свой размер нет — и
+        # <Configure> окна не придёт. Пересчитывать надо каждый раз, а не
+        # только при первом показе: первым идёт однострочное «Сравниваю…»,
+        # а настоящий итог бывает в пять строк.
+        self._make_room()
 
     def show_attempt(self, text: str, outcome: LearnOutcome) -> None:
         """Открыть окно с неудавшейся попыткой хоткея. Можно звать из любого потока.
@@ -394,6 +466,128 @@ class LexiconWindow:
             self._list.apply_font()
         if self._window is not None and self._window.winfo_exists():
             uifont.fit_window(self._window, chars=40, lines=WINDOW_LINES)
+            # Размер окна от смены шрифта мог и не поменяться, а с ним и
+            # <Configure> не придёт, — тогда как высота частей поменялась.
+            self._make_room()
+
+    # --- место в окне ----------------------------------------------------------
+
+    def _on_resize(self, event: tk.Event) -> None:
+        # Привязка на окне ловит <Configure> и всех его частей. Нужно только
+        # самого окна, и пересчёт один на пачку событий.
+        if str(event.widget) != str(self._window) or self._room_pending:
+            return
+        self._room_pending = True
+        self._window.after_idle(self._make_room)
+
+    def _make_room(self) -> None:
+        """Делит высоту окна, когда всего в нём не помещается.
+
+        Найдено 02.11: с тех пор как 23.09 в окне появилось поле для
+        исправленного текста, при шрифте 16 списку выученных правок оставалась
+        одна строка, а при шрифте 28 на экране 1024×768 пропадали кнопки
+        «Забыть».
+
+        Кнопки и поле не уступают никогда, список держит LIST_MIN_LINES строк.
+        Оставшееся место первым получает итог попытки — это ответ на то, что
+        человек только что сделал; не хватает — итог прокручивается, но не
+        меньше RESULT_MIN_LINES строк. Дальше подсказка над полем, последним
+        пояснение внизу. Пояснения уходят целиком, а не обрезаются: обрезанный
+        по высоте текст выглядит поломкой. Растянули окно — вернулись на свои
+        места.
+        """
+        self._room_pending = False
+        win, hint, note = self._window, self._hint, self._note
+        if win is None or hint is None or note is None or not win.winfo_exists():
+            return
+        # Сначала раскладка по новому размеру окна: она тоже стоит в очереди
+        # отложенных задач, и без этой строки ширина поля бралась прежняя —
+        # растянутое одним движением окно не возвращало подсказку.
+        win.update_idletasks()
+        # Перенос по ширине задаём сами, не дожидаясь <Configure> подписей:
+        # у убранной подписи его не будет, а высота нужна именно её. Ширины
+        # те же, что подписи получают на своих местах.
+        _wrap(hint, self._box.winfo_width())
+        self._wrap_note(win.winfo_width() - 2 * NOTE_PADX)
+        win.update_idletasks()
+
+        line = tkfont.nametofont("TkDefaultFont").metrics("linespace")
+        hint_h = hint.winfo_reqheight()
+        note_h = note.winfo_reqheight() + NOTE_PADY
+        row = self._result_row
+        has_result = bool(row.winfo_manager())
+        send_h = self._send_frame.winfo_reqheight() + SEND_PADY
+        if hint.winfo_manager():
+            send_h -= hint_h
+        if has_result:
+            send_h -= row.winfo_reqheight() + RESULT_PADY
+        free = win.winfo_height() - (
+            self._top.winfo_reqheight()
+            + send_h
+            + self._bottom.winfo_reqheight()
+            + LIST_MIN_LINES * line
+            + _inner_padding(self._list.text)
+            + LIST_PADY
+        )
+
+        if has_result:
+            wanted = _display_lines(self._result)
+            fits = (free - RESULT_PADY) // line
+            lines = max(min(wanted, RESULT_MIN_LINES), min(wanted, fits))
+            self._result.configure(height=lines)
+            scroll = self._result_scroll
+            if lines < wanted and not scroll.winfo_manager():
+                scroll.pack(side="right", fill="y", before=self._result)
+            elif lines >= wanted and scroll.winfo_manager():
+                scroll.pack_forget()
+            self._result.yview_moveto(0)
+            free -= lines * line + RESULT_PADY
+
+        show_hint = hint_h <= free
+        show_note = show_hint and hint_h + note_h <= free
+
+        if show_hint and not hint.winfo_manager():
+            hint.pack(fill="x", before=self._box)
+        elif not show_hint and hint.winfo_manager():
+            hint.pack_forget()
+        if show_note and not note.winfo_manager():
+            note.pack(
+                side="bottom",
+                fill="x",
+                padx=NOTE_PADX,
+                pady=(0, NOTE_PADY),
+                after=self._send_frame,
+            )
+        elif not show_note and note.winfo_manager():
+            note.pack_forget()
+
+
+def _display_lines(text: tk.Text) -> int:
+    """Сколько строк занимает текст поля при его нынешней ширине."""
+    try:
+        counted = text.count("1.0", "end-1c", "update", "displaylines")
+    except tk.TclError:  # pragma: no cover
+        return 1
+    # В разных версиях Python одно и то же приходит числом, кортежем или
+    # None (ноль переносов).
+    if isinstance(counted, tuple):
+        counted = counted[0] if counted else 0
+    return int(counted or 0) + 1
+
+
+def _inner_padding(text: tk.Text) -> int:
+    """Рамка и отступы внутри поля списка: строки текста их не включают.
+
+    Без них обещанных строк на деле было на одну меньше: у списка рамка в
+    пиксель и отступ в 10 пикселей сверху и снизу.
+    """
+    total = 0
+    for option in ("borderwidth", "highlightthickness", "pady"):
+        try:
+            total += 2 * int(text.winfo_fpixels(text.cget(option)))
+        except (tk.TclError, ValueError):  # pragma: no cover
+            pass
+    return total
 
 
 def _wrap(label: ttk.Label, width: int) -> None:
