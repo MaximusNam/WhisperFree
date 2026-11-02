@@ -938,13 +938,18 @@ class TestWindowFitsItsFont:
         finally:
             uifont.apply_size(root, was)
 
-    def test_a_new_window_keeps_the_size_it_asked_for(self, root):
+    def test_a_new_window_keeps_the_size_it_asked_for(self, root, monkeypatch):
         """Ещё не показанное окно имеет размер 1×1. fit_window принимал это за
         «меньше наименьшего» и затирал заданный размер наименьшим: окно правок
         вместо 760 пикселей открывалось в 440, и пояснения в нём разъезжались
-        на столько строк, что списку не оставалось места."""
+        на столько строк, что списку не оставалось места.
+
+        Экран подменяем: на раннере GitHub он 1024×768, и 660 пикселей законно
+        ужимаются до 648 — это проверяет следующий тест."""
         from whisperfree import uifont
 
+        monkeypatch.setattr(tk.Misc, "winfo_screenwidth", lambda self: 2560)
+        monkeypatch.setattr(tk.Misc, "winfo_screenheight", lambda self: 1440)
         window = tk.Toplevel(root)
         window.geometry("760x660+4000+4000")
         uifont.fit_window(window, chars=10, lines=5)
