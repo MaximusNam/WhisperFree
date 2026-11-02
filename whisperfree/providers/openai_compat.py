@@ -20,6 +20,29 @@ log = logging.getLogger(__name__)
 # Коды, при которых имеет смысл повторить запрос.
 RETRYABLE_STATUS = {408, 409, 425, 429, 500, 502, 503, 504}
 
+# Сколько ждать установки соединения. TCP до Groq — около 25 мс, TLS — сотни
+# миллисекунд; пять секунд — с запасом даже для раздачи с телефона. Соединение,
+# не установленное за пять секунд, не установится и за тридцать.
+CONNECT_TIMEOUT_S = 5.0
+
+# Сколько ждать ответа: столько на любую запись плюс столько на секунду звука,
+# но не дольше [provider].timeout_s. Замер по журналу пользователя, 3061
+# распознавание: медиана 0.3 с, 99,9 % — до 1.7 с, 228 секунд звука — 1.9 с.
+# Дольше 2.3 с был один запрос из 3061 — 21 с на пяти секундах, на медленной
+# сети; только он и выходит за этот срок, и теперь он ушёл бы в отложенные,
+# а не держал плашку.
+#
+# Раньше ждали 30 с на каждую операцию и трижды подряд. Живой случай 02.11:
+# сеть с телефона пропала, и плашка «Распознаю…» висела 127 секунд, а
+# следующие диктовки стояли в очереди за ней.
+RESPONSE_BASE_S = 10.0
+RESPONSE_PER_AUDIO_S = 0.1
+
+# Повторов, когда виновата связь. Один — чтобы пережить случайный сбой
+# рукопожатия. Больше бессмысленно: сеть лежит, а звук всё равно уходит в
+# отложенные (whisperfree.pending) и отправится сам, когда она вернётся.
+NETWORK_RETRIES = 1
+
 
 class OpenAICompatProvider:
     """Клиент к /audio/transcriptions."""
@@ -50,6 +73,10 @@ class OpenAICompatProvider:
                 "нет API-ключа — задайте его в .env рядом с программой"
             )
 
+        wait = self.response_timeout(request.duration_s)
+        timeout = httpx.Timeout(
+            connect=CONNECT_TIMEOUT_S, read=wait, write=wait, pool=CONNECT_TIMEOUT_S
+        )
         files = {"file": (request.filename, request.audio, "application/octet-stream")}
         data: dict[str, str] = {"model": self.model, "response_format": "json"}
         if request.language:
@@ -57,34 +84,46 @@ class OpenAICompatProvider:
         if request.prompt:
             data["prompt"] = request.prompt
 
-        last_error: TranscriptionError | None = None
-        for attempt in range(self.max_retries + 1):
-            if attempt:
-                delay = min(4.0, 0.4 * (2 ** (attempt - 1))) + random.uniform(0, 0.2)
-                log.info("повтор запроса %d через %.1f с", attempt, delay)
-                time.sleep(delay)
+        attempt = 0
+        while True:
             try:
-                return self._once(files, data)
+                return self._once(files, data, timeout, wait)
             except TranscriptionError as exc:
-                last_error = exc
-                if not exc.retryable:
+                budget = NETWORK_RETRIES if exc.network else self.max_retries
+                if not exc.retryable or attempt >= min(budget, self.max_retries):
                     raise
-        assert last_error is not None
-        raise last_error
+            attempt += 1
+            delay = min(4.0, 0.4 * (2 ** (attempt - 1))) + random.uniform(0, 0.2)
+            log.info("повтор запроса %d через %.1f с", attempt, delay)
+            time.sleep(delay)
 
-    def _once(self, files: dict, data: dict) -> str:
+    def response_timeout(self, duration_s: float) -> float:
+        """Сколько ждать ответа на запись такой длины — см. RESPONSE_BASE_S."""
+        wait = RESPONSE_BASE_S + RESPONSE_PER_AUDIO_S * max(0.0, float(duration_s or 0.0))
+        return min(self.timeout_s, wait)
+
+    def _once(self, files: dict, data: dict, timeout: httpx.Timeout, wait: float) -> str:
         headers = {"Authorization": f"Bearer {self.api_key}"}
         try:
             response = self._client.post(
-                self.endpoint, headers=headers, files=files, data=data
+                self.endpoint, headers=headers, files=files, data=data, timeout=timeout
             )
-        except httpx.TimeoutException as exc:
+        except httpx.ConnectTimeout as exc:
             raise TranscriptionError(
-                f"провайдер не ответил за {self.timeout_s:.0f} с", retryable=True
+                "сеть недоступна: соединение не установилось за "
+                f"{CONNECT_TIMEOUT_S:.0f} с",
+                retryable=True, deferrable=True, network=True,
+            ) from exc
+        except httpx.TimeoutException as exc:
+            # Запрос ушёл, а ответа нет. Повторять тут же не будем: ждали уже
+            # долго, а звук не потеряется — он уйдёт в отложенные.
+            raise TranscriptionError(
+                f"провайдер не ответил за {wait:.0f} с", deferrable=True
             ) from exc
         except httpx.HTTPError as exc:
             raise TranscriptionError(
-                f"сеть недоступна: {type(exc).__name__}", retryable=True
+                f"сеть недоступна: {type(exc).__name__}",
+                retryable=True, deferrable=True, network=True,
             ) from exc
 
         if response.status_code >= 400:
@@ -132,7 +171,8 @@ def _http_error(response: httpx.Response) -> TranscriptionError:
 
     if detail:
         message = f"{message}: {detail}"
-    return TranscriptionError(message, retryable=code in RETRYABLE_STATUS)
+    passing = code in RETRYABLE_STATUS
+    return TranscriptionError(message, retryable=passing, deferrable=passing)
 
 
 def _extract_text(response: httpx.Response) -> str:

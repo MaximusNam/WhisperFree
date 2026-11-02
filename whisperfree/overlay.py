@@ -279,18 +279,24 @@ class Overlay:
         # до самого её конца.
         self._push("refining", None, None, session)
 
-    def ok(self, text: str = "", session: int | None = None) -> None:
+    def ok(
+        self, text: str = "", session: int | None = None, hold_ms: int = 1200
+    ) -> None:
         """Успех. session — номер из begin_session(), если он есть у вызывающего.
 
         Результат приходит из рабочего потока и легко опаздывает: без номера
         «Готово» от прошлой диктовки затирает уже зажжённую «Запись…».
+
+        hold_ms — сколько держать. Обычное «Готово» гаснет за 1.2 с: человек и
+        так видит вставленный текст. Сообщению, которое приходит само, через
+        минуты после диктовки, этого мало — его просто не успеют заметить.
         """
         if self._stale(session, "готово"):
             return
         preview = " ".join(text.split())
         if len(preview) > 34:
             preview = preview[:33] + "…"
-        self._push("ok", preview or None, 1200, session)
+        self._push("ok", preview or None, hold_ms, session)
 
     def error(self, message: str, session: int | None = None) -> None:
         """Ошибка. session — как у ok(): опоздавшая ошибка не гасит новую запись."""

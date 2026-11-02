@@ -122,18 +122,84 @@ class TestFailures:
             provider.transcribe(request())
         assert len(recorder.calls) == 3  # первый заход плюс два повтора
 
-    def test_timeout_is_retryable_and_readable(self, provider, monkeypatch):
+    def test_silence_from_the_server_is_not_waited_out_three_times(
+        self, provider, monkeypatch
+    ):
+        """Живой случай 02.11: сеть с телефона пропала, ожидание ответа было по
+        30 с и трижды подряд, и плашка «Распознаю…» висела 127 секунд. Теперь
+        попытка одна: звук не потеряется, он уходит в отложенные."""
         recorder = Recorder(httpx.ReadTimeout("too slow"))
         monkeypatch.setattr(provider._client, "post", recorder)
 
-        with pytest.raises(TranscriptionError, match="не ответил"):
+        with pytest.raises(TranscriptionError, match="не ответил") as caught:
             provider.transcribe(request())
-        assert len(recorder.calls) == 3
+        assert len(recorder.calls) == 1
+        assert caught.value.deferrable, "звук такой диктовки надо отложить, а не выбросить"
 
     def test_network_error_is_readable(self, provider, monkeypatch):
         monkeypatch.setattr(provider._client, "post", Recorder(httpx.ConnectError("no route")))
         with pytest.raises(TranscriptionError, match="сеть недоступна"):
             provider.transcribe(request())
+
+    def test_a_dead_network_gets_one_retry_not_two(self, provider, monkeypatch):
+        """Соединение не установилось — значит, лежит сеть, а не сервер. Один
+        повтор переживает случайный сбой рукопожатия; больше — только держит
+        человека перед «Распознаю…»."""
+        recorder = Recorder(httpx.ConnectError("no route"))
+        monkeypatch.setattr(provider._client, "post", recorder)
+        with pytest.raises(TranscriptionError) as caught:
+            provider.transcribe(request())
+        assert len(recorder.calls) == 2
+        assert caught.value.deferrable and caught.value.network
+
+    def test_a_busy_server_still_gets_its_retries(self, provider, monkeypatch):
+        # 503 — сеть есть, сервер занят: тут повторы осмысленны, как и были.
+        recorder = Recorder(response(503, {}))
+        monkeypatch.setattr(provider._client, "post", recorder)
+        with pytest.raises(TranscriptionError) as caught:
+            provider.transcribe(request())
+        assert len(recorder.calls) == 3
+        assert caught.value.deferrable and not caught.value.network
+
+    def test_a_rejected_key_is_not_worth_waiting_for(self, provider, monkeypatch):
+        monkeypatch.setattr(provider._client, "post", Recorder(response(401, {})))
+        with pytest.raises(TranscriptionError) as caught:
+            provider.transcribe(request())
+        assert not caught.value.deferrable
+
+
+class TestTimeouts:
+    """Срок ожидания считается от длины записи, а не один на всё."""
+
+    def make(self, timeout_s=30.0):
+        return OpenAICompatProvider("https://x/v1", "m", api_key="k", timeout_s=timeout_s)
+
+    def test_short_records_wait_about_ten_seconds(self):
+        p = self.make()
+        assert p.response_timeout(5.0) == pytest.approx(10.5)
+        p.close()
+
+    def test_long_records_wait_longer(self):
+        p = self.make()
+        assert p.response_timeout(150.0) == pytest.approx(25.0)
+        p.close()
+
+    def test_the_config_caps_the_wait(self):
+        p = self.make(timeout_s=30.0)
+        assert p.response_timeout(300.0) == 30.0
+        p.close()
+
+    def test_the_wait_reaches_the_request(self, monkeypatch):
+        """Срок передаётся в сам запрос: без этого он остался бы на бумаге."""
+        p = self.make()
+        recorder = Recorder(response(200, {"text": "ок"}))
+        monkeypatch.setattr(p._client, "post", recorder)
+        req = TranscriptionRequest(audio=b"x", filename="a.flac", duration_s=50.0)
+        p.transcribe(req)
+        timeout = recorder.calls[0][1]["timeout"]
+        assert timeout.read == pytest.approx(15.0)
+        assert timeout.connect == pytest.approx(5.0)
+        p.close()
 
     def test_server_detail_is_surfaced(self, provider, monkeypatch):
         body = {"error": {"message": "audio file too short"}}

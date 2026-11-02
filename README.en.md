@@ -261,6 +261,39 @@ The clipboard is restored to its previous contents 300 ms after the paste. If yo
 want the last transcript to stay on the clipboard, the way Wispr Flow does it,
 set `restore_clipboard = false`.
 
+### When the network drops
+
+The dictation is not lost. If the request never reached the provider, or no
+answer came back, the compressed audio is set aside in
+`%APPDATA%\WhisperFree\pending`, the bar says "нет сети — отложил", and the
+history keeps a record marked accordingly. Once the network is back, the program
+sends it on its own: first try after 10 s, then the pause doubles up to a minute,
+and any dictation that does get through wakes it at once. Set-aside audio
+survives a restart and is kept for a day at most.
+
+The recognised text is **not pasted on its own**: minutes later anything at all
+may be under the cursor. The bar says "вставить: ctrl+alt+v", the history record
+gets its text, and the very next Ctrl+Alt+V pastes exactly that. After 15
+minutes Ctrl+Alt+V goes back to meaning "the last dictation", and the text stays
+in the history.
+
+Nor does the program sit out an outage any more. It waits 5 s for a connection
+and retries once if refused; it waits 10 s plus 0.1 s per second of audio for an
+answer and does not retry. Measured on the real network stack:
+
+| What happened | Before | Now |
+|---|---|---|
+| server accepted the connection and stayed silent, 5 s recording | 127 s | 10.5 s |
+| same, 77 s recording | 127 s | 17.7 s |
+| server name does not resolve | 1.3 s | 0.5 s |
+| connection cannot be established | — | 4.6 s |
+
+The answer deadline is not a guess: out of 3061 recognitions in my log, 99.9%
+finished within 1.7 s, and exactly one took longer than 2.3 s — 21 s on a slow
+network. That one would now be set aside instead of holding the bar. A rejected
+key or an over-long recording will not be fixed by waiting, so those are not set
+aside.
+
 ---
 
 ## Mixed-language dictation

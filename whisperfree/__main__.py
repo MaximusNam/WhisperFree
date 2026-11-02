@@ -20,6 +20,7 @@ import sys
 import threading
 import time
 import tkinter as tk
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -33,6 +34,7 @@ from .hotkey import HotkeyManager
 from .lexicon_window import LexiconWindow
 from .logutil import Stopwatch, setup_logging
 from .overlay import Overlay
+from .pending import PendingItem, PendingStore, Resender
 from .postprocess import Postprocessor
 from .providers import TranscriptionError, TranscriptionRequest, build_provider
 from .limits import report as report_limits
@@ -87,6 +89,24 @@ class Job:
     error: str = ""
     session: int | None = None
     pending: Record | None = None
+    # Сколько клавишу держали — замерено на отпускании, а не в рабочем потоке.
+    # Рабочий поток может добраться до задания через минуты, если очередь
+    # стояла: тогда «держали» вышло бы равным ожиданию в очереди, и в логе
+    # появлялось «потеряно ~118 с звука» там, где не потерялось ничего.
+    held: float = 0.0
+    # Не диктовка, а попытка отправить отложенные (whisperfree.pending): рабочий
+    # поток отправит их и поднимет этот флаг, когда закончит.
+    resend: threading.Event | None = None
+
+
+# Сколько держать на плашке «вставить: ctrl+alt+v» про распознанную отложенную.
+# Она приходит сама, через минуты после диктовки, — за обычные 1.2 с её не
+# заметят.
+RECOVERED_NOTICE_MS = 8000
+
+# Сколько распознанная отложенная ждёт Ctrl+Alt+V. Дольше человек уже не ждёт
+# её, и Ctrl+Alt+V снова означает «последняя диктовка», а она остаётся в истории.
+RECOVERED_TTL_S = 15 * 60
 
 
 class App:
@@ -114,6 +134,14 @@ class App:
             config_mod.audio_cache_dir(),
             cfg.history.keep_audio_count if cfg.history.keep_audio else 0,
         )
+        # Диктовки, которые не ушли на распознавание из-за сети: их звук
+        # лежит на диске и отправится сам, когда сеть вернётся.
+        self.pending = PendingStore(config_mod.pending_dir())
+        self.resender = Resender(self.pending, submit=self._submit_resend)
+        # Распознанные из отложенных, ещё не вставленные: (когда, запись).
+        # Вставлять их самим нельзя — через минуты под курсором может
+        # оказаться что угодно, — поэтому их забирает Ctrl+Alt+V.
+        self._recovered: deque[tuple[float, Record]] = deque()
         self.postprocessor = Postprocessor(cfg.postprocess)
         self.refiner = Refiner(cfg.refine, cfg.provider.base_url, cfg.provider.api_key)
         # Затравку редактора храним отдельно: к ней дописывается список
@@ -213,6 +241,11 @@ class App:
 
         self._worker = threading.Thread(target=self._work, name="transcribe", daemon=True)
         self._worker.start()
+        self.resender.start()
+        waiting = len(self.pending)
+        if waiting:
+            log.info("с прошлого запуска ждут отправки отложенных диктовок: %d", waiting)
+            self.resender.online()
 
         self._register_hotkeys()
         self.hotkeys.start()
@@ -288,6 +321,7 @@ class App:
             self._recording = False
         self._polled_recording = False
         self._stop_polling()
+        self.resender.stop()
         self._jobs.put(None)
         if self.tray is not None:
             self.tray.stop()
@@ -765,7 +799,7 @@ class App:
 
         self.overlay.sending()
         self._jobs.put(
-            Job(capture=capture, lang=lang, started_at=started, session=session)
+            Job(capture=capture, lang=lang, started_at=started, session=session, held=held)
         )
 
     def _fail(
@@ -907,6 +941,12 @@ class App:
             log.exception("не удалось сохранить диктовку после сбоя")
 
     def _run_job(self, job: Job) -> None:
+        if job.resend is not None:
+            try:
+                self._resend_pending()
+            finally:
+                job.resend.set()
+            return
         if job.error:
             self._record_failure(job)
         else:
@@ -986,11 +1026,24 @@ class App:
             )
         except TranscriptionError as exc:
             watch.mark("api")
-            record.error = str(exc)
+            # Связь подвела — звук не выбрасываем: он отправится сам, когда
+            # сеть вернётся. Ключ отклонён или запись слишком длинная —
+            # ожидание не исправит, и откладывать такое незачем.
+            deferred = exc.deferrable and self.pending.add(
+                data, filename, job.lang, job.capture.duration_s, record.ts
+            ) is not None
+            if deferred:
+                record.error = f"{exc} — отложено, отправлю сам, когда сеть вернётся"
+            else:
+                record.error = str(exc)
             self.history.add(record)
             self._refresh_tray()
-            log.error("распознавание не удалось: %s (%s)", exc, watch.summary())
-            self.overlay.error(str(exc), job.session)
+            log.error("распознавание не удалось: %s (%s)", record.error, watch.summary())
+            # На плашке около 19 знаков: «нет сети — отложил» влезает целиком,
+            # «сеть недоступна: ConnectError» — нет, а главное там — что звук цел.
+            self.overlay.error("нет сети — отложил" if deferred else str(exc), job.session)
+            if deferred:
+                self.resender.added()
             return
         watch.mark("api")
         # Ответ получен — значит, за эту диктовку уже заплачено, чем бы ни
@@ -1091,6 +1144,145 @@ class App:
             watch.summary(),
             record.target_exe or "?",
         )
+        if len(self.pending):
+            # Эта диктовка прошла — значит, сеть есть. Отложенным незачем ждать
+            # своей очереди по таймеру.
+            self.resender.online()
+
+    # --- отложенные диктовки ---------------------------------------------------
+
+    def _submit_resend(self, done: threading.Event) -> None:
+        """Поставить попытку отправки отложенных в очередь рабочего потока."""
+        self._jobs.put(Job(capture=None, lang="", started_at=0.0, resend=done))
+
+    def _resend_pending(self) -> None:
+        """Отправить отложенные по порядку, пока сеть отвечает. Рабочий поток."""
+        for item in self.pending.items():
+            if not self._jobs.empty():
+                # Ждёт живая диктовка — она важнее. Её удача сама разбудит
+                # сторожа, и отложенные пойдут сразу следом.
+                return
+            if not self._resend_one(item):
+                return
+
+    def _resend_one(self, item: PendingItem) -> bool:
+        """Одна отложенная диктовка. False — сеть всё ещё лежит, дальше не пробуем."""
+        record = self._record_at(item.record_ts)
+        try:
+            data = self.pending.read(item)
+        except OSError as exc:
+            log.error("отложенная диктовка не читается, выбрасываю: %s", exc)
+            self.pending.remove(item)
+            return True
+        try:
+            raw = self.provider.transcribe(
+                TranscriptionRequest(
+                    audio=data,
+                    filename=item.filename,
+                    language=item.lang,
+                    prompt=self._stt_prompt(item.lang),
+                    duration_s=item.duration_s,
+                )
+            )
+        except TranscriptionError as exc:
+            if exc.deferrable:
+                self.pending.touch(item, str(exc))
+                log.info(
+                    "отложенная диктовка пока не ушла (попытка %d): %s",
+                    item.attempts, exc,
+                )
+                return False
+            # Ожиданием не лечится: ключ отклонён, запись слишком длинная.
+            self.pending.remove(item)
+            log.error("отложенную диктовку отправить нельзя, выбрасываю: %s", exc)
+            if record is not None:
+                self.history.update(record, error=f"повторная отправка не удалась: {exc}")
+                self._refresh_tray()
+            return True
+
+        text, fields = self._polish_quietly(raw)
+        if record is None:
+            # Запись успели вытеснить из истории (или история выключена) —
+            # заводим её заново, чтобы текст не пропал.
+            record = Record(
+                ts=item.record_ts, text="", lang=item.lang,
+                provider=self.provider.name, model=self.provider.model,
+                audio_sec=item.duration_s,
+            )
+            for name, value in fields.items():
+                object.__setattr__(record, name, value)
+            self.history.add(record)
+        else:
+            self.history.update(record, **fields)
+        self.pending.remove(item)
+        self._refresh_tray()
+
+        if not text:
+            log.info("отложенная диктовка распознана, но вставлять нечего: %s", fields["error"])
+            return True
+        self._recovered.append((time.monotonic(), record))
+        log.info(
+            "отложенная диктовка распознана: %.1f с звука -> %d симв.; ждёт %s",
+            item.duration_s, len(text), self.cfg.hotkeys.paste_last,
+        )
+        # Плашку отнимать у идущей записи нельзя: «Запись…» важнее. Текст и так
+        # не пропадёт — он в истории и ждёт Ctrl+Alt+V.
+        if not self._recording:
+            self.overlay.ok(
+                f"вставить: {self.cfg.hotkeys.paste_last}",
+                self._take_plate(),
+                hold_ms=RECOVERED_NOTICE_MS,
+            )
+        return True
+
+    def _polish_quietly(self, raw: str) -> tuple[str, dict]:
+        """Чистка, правка и словарь замен — без плашки и без вставки.
+
+        Тот же порядок, что в _process: правка моделью ПЕРЕД словарём замен,
+        иначе последнее слово о терминах осталось бы за моделью. Возвращает
+        текст и поля записи истории.
+        """
+        fields: dict = {"answered": True, "error": ""}
+        cleaned = self.postprocessor.clean(raw)
+        if not cleaned:
+            preview = " ".join(raw.split())[:23]
+            fields.update(
+                text="",
+                raw=raw,
+                error=(
+                    f"выдумка на тишине: «{preview}», не вставляю"
+                    if preview else "провайдер вернул пустой ответ"
+                ),
+            )
+            return "", fields
+        refined = cleaned
+        if self.refiner.enabled:
+            refined = self.refiner.refine(cleaned)
+            fields["refine_in"], fields["refine_out"] = getattr(
+                self.refiner, "last_usage", (0, 0)
+            )
+        text = self.postprocessor.finish(refined)
+        if not text:
+            fields.update(text="", raw=cleaned, error="правка вернула пустой текст, не вставляю")
+            return "", fields
+        fields.update(text=text, raw=cleaned if refined != cleaned else "")
+        return text, fields
+
+    def _record_at(self, ts: float) -> Record | None:
+        for record in reversed(self.history.records):
+            if record.ts == ts:
+                return record
+        return None
+
+    def _take_recovered(self) -> Record | None:
+        """Следующая распознанная из отложенных, если она ещё свежая."""
+        while self._recovered:
+            at, record = self._recovered.popleft()
+            if time.monotonic() - at <= RECOVERED_TTL_S:
+                return record
+            log.info("распознанная отложенная так и не вставлена за %d мин — остаётся в истории",
+                     RECOVERED_TTL_S // 60)
+        return None
 
     def _nothing_to_paste(
         self,
@@ -1143,7 +1335,7 @@ class App:
             )
         if not job.started_at:
             return
-        held = time.monotonic() - job.started_at
+        held = job.held or (time.monotonic() - job.started_at)
         gap = held - job.capture.duration_s
         if gap > 0.3:
             log.warning(
@@ -1289,6 +1481,12 @@ class App:
         «Записи…» — см. _take_plate.
         """
         session = self._take_plate()
+        # Сначала — распознанное из отложенных: ради него плашка и подсказала
+        # Ctrl+Alt+V. Дальше нажатия идут по истории, как раньше.
+        recovered = self._take_recovered()
+        if recovered is not None:
+            self._paste_record(recovered, reset_cycle=True, session=session)
+            return
         record = self.history.next_for_paste()
         if record is None:
             self.overlay.error("история пуста", session)

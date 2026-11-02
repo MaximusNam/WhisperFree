@@ -553,7 +553,7 @@ class FakeOverlay:
             return
         self.calls.append(("refining", ""))
 
-    def ok(self, text="", session=None):
+    def ok(self, text="", session=None, hold_ms=1200):
         if self._stale(session):
             self.dropped.append(("ok", text))
             return
@@ -1830,3 +1830,151 @@ class TestTwoWaysToSendACorrection:
         assert app.lexicon_window.attempts == []
         assert app.lexicon_window.changed == 1, "открытое окно правок не узнало о новой"
         assert app.overlay.calls[-1] == ("ok", "выучил: редис → Redis")
+
+
+class FakeResender:
+    def __init__(self):
+        self.events = []
+
+    def added(self):
+        self.events.append("added")
+
+    def online(self):
+        self.events.append("online")
+
+    def stop(self):
+        pass
+
+
+class TestNetworkOutage:
+    """Живой случай 02.11: сеть с телефона пропала на шесть минут.
+
+    Пять диктовок ушли в никуда: программа писала «сеть недоступна» и
+    выбрасывала звук. Теперь звук откладывается и отправляется сам, когда сеть
+    вернётся, а распознанное ждёт Ctrl+Alt+V — вставлять самим через минуты
+    нельзя, под курсором может оказаться что угодно.
+    """
+
+    def offline(self, app):
+        from whisperfree.providers import TranscriptionError
+
+        app.resender = FakeResender()
+        app.overlay = FakeOverlay()
+        app.provider = FakeProvider(
+            TranscriptionError("сеть недоступна: ConnectError", deferrable=True, network=True)
+        )
+        app._process(job(app))
+        return app.history.last()
+
+    def test_the_sound_is_kept_and_the_record_says_so(self, app):
+        record = self.offline(app)
+        assert len(app.pending) == 1
+        assert "отложено" in record.error
+        assert not record.answered, "за недошедший запрос не платили"
+        assert app.overlay.calls[-1] == ("error", "нет сети — отложил")
+        assert app.resender.events == ["added"]
+
+    def test_a_rejected_key_is_not_kept(self, app):
+        from whisperfree.providers import TranscriptionError
+
+        app.resender = FakeResender()
+        app.provider = FakeProvider(TranscriptionError("API-ключ отклонён (401)"))
+        app._process(job(app))
+        assert len(app.pending) == 0
+        assert app.resender.events == []
+
+    def test_when_the_network_returns_the_record_gets_its_text(self, app):
+        record = self.offline(app)
+        app.provider = FakeProvider("привет из докера")
+        app._resend_pending()
+
+        assert len(app.pending) == 0
+        assert record.text == "привет из Docker "
+        assert record.error == ""
+        assert record.answered
+        # Само не вставляется: через минуты под курсором может быть что угодно.
+        assert app.injector.pasted == []
+        assert app.overlay.calls[-1] == ("ok", f"вставить: {app.cfg.hotkeys.paste_last}")
+
+    def test_ctrl_alt_v_pastes_the_recovered_one_first(self, app):
+        self.offline(app)
+        app.provider = FakeProvider("привет из докера")
+        app._resend_pending()
+        # Потом прошла ещё одна, обычная диктовка — и её вставили.
+        app.provider = FakeProvider("совсем другая фраза")
+        app._process(job(app))
+        app.injector.pasted.clear()
+
+        app._paste_last()
+        assert app.injector.pasted == ["привет из Docker "]
+
+    def test_a_stale_recovered_one_gives_way_to_history(self, app, monkeypatch):
+        from whisperfree import __main__ as main_mod
+
+        self.offline(app)
+        app.provider = FakeProvider("привет из докера")
+        app._resend_pending()
+        monkeypatch.setattr(main_mod, "RECOVERED_TTL_S", -1)
+        app._paste_last()
+        # Протухшая отложенная уступает обычному порядку истории.
+        assert app.injector.pasted == [app.history.last().text]
+
+    def test_still_offline_keeps_the_sound(self, app):
+        self.offline(app)
+        app._resend_pending()  # провайдер всё ещё без сети
+        [item] = app.pending.items()
+        assert item.attempts == 1
+
+    def test_hopeless_resend_is_dropped_with_a_reason(self, app):
+        from whisperfree.providers import TranscriptionError
+
+        record = self.offline(app)
+        app.provider = FakeProvider(TranscriptionError("API-ключ отклонён (401)"))
+        app._resend_pending()
+        assert len(app.pending) == 0
+        assert "повторная отправка не удалась" in record.error
+
+    def test_a_live_success_wakes_the_resender(self, app):
+        self.offline(app)
+        app.provider = FakeProvider("привет из докера")
+        app._process(job(app))
+        assert app.resender.events[-1] == "online"
+
+    def test_the_plate_of_a_live_recording_is_not_taken(self, app):
+        self.offline(app)
+        app.provider = FakeProvider("привет из докера")
+        app._recording = True
+        try:
+            app._resend_pending()
+        finally:
+            app._recording = False
+        assert ("ok", f"вставить: {app.cfg.hotkeys.paste_last}") not in app.overlay.calls
+
+    def test_the_resend_goes_through_the_worker_queue(self, app):
+        """Отправку делает рабочий поток: клиент провайдера у программы один,
+        и два запроса из двух потоков разом ему не нужны."""
+        import threading as _threading
+
+        done = _threading.Event()
+        app._submit_resend(done)
+        queued = app._jobs.get_nowait()
+        assert queued.resend is done
+        app._run_job(queued)
+        assert done.is_set()
+
+
+class TestHeldIsMeasuredOnRelease:
+    """«Потеряно ~118 с звука» — ложная тревога из живого случая 02.11.
+
+    Время удержания считалось в рабочем потоке, а задание две минуты стояло в
+    очереди за зависшим запросом: ожидание в очереди выдавалось за потерянный
+    звук.
+    """
+
+    def test_a_late_job_does_not_report_lost_sound(self, app, caplog):
+        late = job(app)
+        late.started_at = time.monotonic() - 120.0  # стояло в очереди
+        late.held = late.capture.duration_s           # а держали честно
+        with caplog.at_level(logging.WARNING):
+            app._check_for_dropped_audio(late)
+        assert not any("потеряно" in r.getMessage() for r in caplog.records)
