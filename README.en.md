@@ -444,8 +444,10 @@ Hence the rules:
   ё and е count as different letters here: "все" → "всё" was the single most
   common correction in my own history (39 times across 641 dictations), and as a
   replacement it would turn "everyone arrived" into "everything arrived".
-- **A whole phrase rewritten**, or more than five replacements at once — nothing
-  is learned: that is a new text, not a correction.
+- **A whole text rewritten** — more than half of its words changed — nothing
+  is learned: that is a new text, not a correction. The number of fixes alone
+  does not matter: in a long dictation you can fix a dozen words, and each one
+  is checked on its own. Commas and periods do not count as fixes.
 
 **A second way, without selecting.** The "Learned corrections" tray item opens
 a window with a "Corrected text" box at the top. Paste the corrected dictation

@@ -34,6 +34,7 @@ from whisperfree.lexicon import (
     learnable,
     same_sound,
     sound,
+    word_diff,
 )
 from whisperfree.postprocess import Postprocessor
 
@@ -236,6 +237,24 @@ class TestDiff:
     def test_identical_texts_give_nothing(self):
         assert diff_pairs("один и тот же", "один и тот же") == []
 
+    def test_punctuation_is_not_a_replacement(self):
+        assert diff_pairs("смотрю уже на страничке", "Смотрю, уже — на страничке.") == [
+            ("смотрю", "Смотрю,")
+        ]
+        assert diff_pairs("смотрю уже на страничке", "смотрю, уже на страничке.") == []
+
+    def test_a_comma_does_not_glue_a_fix_to_its_neighbour(self):
+        # Без сравнения по словам без знаков «поставил» → «поставил,» и
+        # «докер» → «Docker» шли одной заменой из двух слов.
+        assert diff_pairs("поставил докер потом", "поставил, Docker потом") == [
+            ("докер", "Docker")
+        ]
+
+    def test_share_counts_only_replaced_words(self):
+        pairs, share = word_diff("один два три четыре", "один 2 три четыре")
+        assert pairs == [("два", "2")]
+        assert share == pytest.approx(0.25)
+
 
 class TestBlame:
     """Кто испортил слово: микрофон, модель или свой же словарь замен."""
@@ -371,17 +390,59 @@ class TestLearning:
         assert learned == []
         assert refused
 
-    def test_too_many_replacements_at_once_are_refused(self, tmp_path):
-        # Замены должны быть РАЗДЕЛЕНЫ неизменным текстом: пять слов подряд
+    def test_a_rewritten_paragraph_is_refused(self, tmp_path):
+        # Замены должны быть РАЗДЕЛЕНЫ неизменным текстом: слова подряд
         # схлопнулись бы в одну замену, и сработала бы другая защита — от
-        # правки фразы целиком.
+        # правки фразы целиком. Здесь поменялись шесть слов из восьми.
         lex = make(tmp_path, max_per_press=2)
         learned, refused = lex.learn(
-            "поставил докер, открыл гитхаб, запустил питон и поднял редис",
-            "поставил Docker, открыл GitHub, запустил Python и поднял Redis",
+            "докер гитхаб и питон редис и реакт ноду",
+            "Docker GitHub и Python Redis и React Node",
         )
         assert learned == []
         assert "переписан" in refused[0]
+
+    def test_many_fixes_in_a_long_dictation_are_learned(self, tmp_path):
+        # Живой случай 03.11: в абзаце из 68 слов поправлено восемь мест, и
+        # программа не взяла ни одного — «8 замен подряд, текст переписан
+        # целиком». Восемь замен на 68 слов — это правка, а не пересказ.
+        lex = make(tmp_path)
+        before = (
+            "По стратегии ML, которые мы выложили на CRR, я их подразумевал для "
+            "исследования не как отдельные стратегии, а просто как варианты "
+            "лучшего выхода у нас из шарта, из ланга по трейлингу, либо по "
+            "столбам, то есть как-то исследовал. Поэтому надо посмотреть, взять "
+            "эти результаты исследований и сравнить их с нашими стратегиями Z, "
+            "какие из этих выходов будут лучше, чем те, что у нас уже есть по "
+            "стратегиям Z."
+        )
+        after = (
+            "По стратегиям M1, которые мы выложили на VPS, я их подразумевал для "
+            "исследования не как отдельные стратегии, а просто как варианты "
+            "лучшего выхода у нас из шорта, из лонга по трейлингу, либо по "
+            "стопам, то есть как-то исследовать. Поэтому надо посмотреть, взять "
+            "эти результаты исследований и сравнить их с нашими стратегиями Z1, "
+            "какие из этих выходов будут лучше, чем те, что у нас уже есть по "
+            "стратегиям Z1."
+        )
+        assert len(diff_pairs(before, after)) == 8
+        learned, refused = lex.learn(before, after)
+        assert {(item.wrong, item.right) for item in learned} >= {
+            ("шарта", "шорта"), ("ланга", "лонга"), ("столбам", "стопам"),
+        }
+        assert not any("переписан" in line for line in refused)
+
+    def test_commas_are_not_counted_as_replacements(self, tmp_path):
+        # Человек расставил запятые и поправил одно слово. Раньше каждая
+        # запятая шла заменой «слово» → «слово,» и в предел числа замен, и
+        # одна настоящая правка тонула в «тексте, переписанном целиком».
+        lex = make(tmp_path, max_per_press=1)
+        learned, refused = lex.learn(
+            "Смотрю уже на страничке есть три новые стратегии начали работать на шарта",
+            "Смотрю, уже на страничке есть три новые стратегии, начали работать на шорта.",
+        )
+        assert [(item.wrong, item.right) for item in learned] == [("шарта", "шорта")]
+        assert refused == []
 
     def test_a_run_of_words_is_refused_as_a_phrase(self, tmp_path):
         # Пять слов подряд приходят одной заменой, и её отклоняет уже предел
